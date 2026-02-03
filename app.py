@@ -36,7 +36,8 @@ def user_input_features():
     data['total ether balance'] = total_balance
     data['min value received'] = min_val_rx
     data['avg val received'] = avg_val_rx
-    data['Total ERC20 tnxs'] = total_erc20
+    # NEW (Correct)
+    data[' Total ERC20 tnxs'] = total_erc20
     
     return pd.DataFrame([data])
 
@@ -61,16 +62,32 @@ if st.button("Analyze Transaction"):
     else:
         st.success(f"✅ LEGITIMATE TRANSACTION (Confidence: {probability[0][0]*100:.2f}%)")
 
-    # 6. xAI Explanation (SHAP)
+   # 6. xAI Explanation (SHAP)
     st.subheader("📝 Explainable AI (Why?)")
     with st.spinner('Calculating SHAP values...'):
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(input_df)
         
-        # Create a Force Plot
-        st.set_option('deprecation.showPyplotGlobalUse', False)
-        fig, ax = plt.subplots(figsize=(10, 3))
-        shap.force_plot(explainer.expected_value, shap_values[0,:], input_df.iloc[0,:], matplotlib=True, show=False)
+        # Create a specialized "Explanation" object for the waterfall plot
+        # This handles the data formatting automatically
+        explanation = shap.Explanation(
+            values=shap_values[0], 
+            base_values=explainer.expected_value, 
+            data=input_df.iloc[0], 
+            feature_names=input_df.columns
+        )
+        
+        # Create a clean figure
+        fig, ax = plt.subplots(figsize=(8, 5))
+        
+        # Draw the Waterfall Plot
+        shap.plots.waterfall(explanation, show=False)
+        
+        # Display in Streamlit
         st.pyplot(fig, bbox_inches='tight')
         
-        st.info("Red bars push the risk UP. Blue bars push the risk DOWN.")
+        st.info("⬇️ How to read this graph:\n"
+                "* **E[f(x)]** is the average risk score.\n"
+                "* **Red Bars (+)** mean this feature increases fraud risk.\n"
+                "* **Blue Bars (-)** mean this feature makes it look safe.\n"
+                "* **f(x)** is the final calculated risk score.")
