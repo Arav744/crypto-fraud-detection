@@ -20,25 +20,40 @@ Adjust the transaction parameters below to test the model.
 st.sidebar.header("Transaction Features")
 
 def user_input_features():
-    # We create inputs for the TOP 5 most important features
-    # You can add more, but these 5 drive most decisions
-    time_diff = st.sidebar.slider('Time Diff between first & last (Mins)', 0.0, 10000.0, 50.0)
+    # Sidebar inputs
+    st.sidebar.header("Transaction Features")
+    time_diff = st.sidebar.slider('Time Diff between first & last (Mins)', 0.0, 100000.0, 50.0) # Increased max range
     total_balance = st.sidebar.number_input('Total Ether Balance', min_value=0.0, value=0.0)
     min_val_rx = st.sidebar.number_input('Min Value Received', min_value=0.0, value=10.0)
     avg_val_rx = st.sidebar.number_input('Avg Value Received', min_value=0.0, value=5.0)
     total_erc20 = st.sidebar.number_input('Total ERC20 Tnxs', min_value=0, value=1)
     
-    # Initialize a dictionary with all 0s for all features
+    # Crucial Input
+    sent_tnx = st.sidebar.number_input('Sent Tnx', min_value=0, value=0) 
+
+    # 1. Start with a baseline of Zeros
     data = {col: 0 for col in feature_names}
     
-    # Update the specific values we collected
+    # 2. Add the User Inputs
     data['Time Diff between first and last (Mins)'] = time_diff
     data['total ether balance'] = total_balance
     data['min value received'] = min_val_rx
     data['avg val received'] = avg_val_rx
-    # NEW (Correct)
     data[' Total ERC20 tnxs'] = total_erc20
-    
+    data['Sent tnx'] = sent_tnx
+
+    # 3. SMART LOGIC: Auto-fill the "Ghost" variables
+    # If we have sent transactions, we must have sent money and used addresses!
+    if sent_tnx > 0:
+        data['Unique Sent To Addresses'] = int(sent_tnx / 2) + 1  # Assume we sent to a few different friends
+        data['total Ether sent'] = sent_tnx * 1.5               # We sent some ETH
+        data['avg val sent'] = 1.5                              # Average sent amount
+        data['Received Tnx'] = sent_tnx + 5                     # Normal users receive money too
+        data['Unique Received From Addresses'] = 5              # From a few sources
+        
+        # Balance the math (Received must be > Sent + Balance)
+        data['total ether received'] = total_balance + data['total Ether sent'] + 10
+
     return pd.DataFrame([data])
 
 input_df = user_input_features()
