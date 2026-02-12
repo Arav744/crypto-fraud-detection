@@ -1,3 +1,4 @@
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://crypto-fraud-detection-xwc5e4mdbyjzk2kpyh59cp.streamlit.app/)
 # 🕵️‍♂️ Ethereum Fraud Detection with Explainable AI
 
 ## 🚀 Project Overview
@@ -18,3 +19,4 @@ A machine learning system that detects fraudulent Ethereum transactions with **9
 1. Clone the repo:
    ```bash
    git clone [https://github.com/YOUR_USERNAME/ethereum-fraud-detection.git](https://github.com/YOUR_USERNAME/ethereum-fraud-detection.git)
+
