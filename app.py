@@ -11,12 +11,11 @@ import matplotlib.pyplot as plt
 # ==========================================
 # 1. DEFINE THE MODEL ARCHITECTURE
 # ==========================================
-# This MUST match the class used in your training notebook exactly.
 class FraudGNN(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        # Input features: 166 (Elliptic dataset standard)
-        self.conv1 = SAGEConv(166, 128)
+        # FIX: Changed input from 166 to 165 to match your training data
+        self.conv1 = SAGEConv(165, 128)
         self.conv2 = SAGEConv(128, 2)
 
     def forward(self, data):
@@ -35,11 +34,14 @@ def load_gnn_model():
     # Initialize the empty model architecture
     model = FraudGNN()
     try:
-        # Load the weights you saved from the notebook
+        # Load the weights
         model.load_state_dict(torch.load("gnn_model_sage.pth", map_location=torch.device('cpu')))
-        model.eval()  # Set to evaluation mode (turns off dropout)
+        model.eval()
         return model
     except FileNotFoundError:
+        return None
+    except RuntimeError as e:
+        st.error(f"❌ Model Size Mismatch: {e}")
         return None
 
 # Load model immediately
@@ -63,12 +65,10 @@ with col1:
     st.info("Enter the transaction parameters below.")
     
     # User Inputs
-    # We map these few inputs to the 166-feature vector
     time_step = st.slider("Time Step (Hour)", 1, 49, 20, help="When did this happen?")
     tx_amount = st.number_input("Transaction Amount (BTC/ETH)", value=50.0)
     fee = st.number_input("Gas Fee / Transaction Fee", value=0.002)
     
-    # New "Graph" Inputs
     st.markdown("---")
     st.subheader("Network Context")
     in_degree = st.number_input("Inputs (In-degree)", min_value=0, value=1, help="How many wallets sent money to this address?")
@@ -82,25 +82,25 @@ with col1:
 with col2:
     if run_btn:
         if gnn_model is None:
-            st.error("❌ Model file 'gnn_model_sage.pth' not found. Please save it from your notebook first.")
+            st.error("❌ Model file 'gnn_model_sage.pth' not found or corrupt.")
         else:
             st.header("2. Risk Analysis")
             
             # --- A. Construct the Input Tensor ---
-            # The model expects 166 features. We create a zero vector and fill what we have.
-            # This is a standard technique for demos when full feature extraction isn't available.
-            x_input = np.zeros((1, 166))
-            x_input[0, 0] = time_step
-            x_input[0, 1] = tx_amount
-            x_input[0, 2] = fee
-            x_input[0, 3] = in_degree
-            x_input[0, 4] = out_degree
+            # FIX: Changed size from 166 to 165
+            x_input = np.zeros((1, 165))
+            
+            # Map inputs to the feature vector (Demo Approximation)
+            # Since we dropped time_step in training, we don't map it to index 0.
+            # We map Amount to feat_0 and Fee to feat_1 for this demo.
+            x_input[0, 0] = tx_amount
+            x_input[0, 1] = fee
+            x_input[0, 2] = in_degree
+            x_input[0, 3] = out_degree
             
             x_tensor = torch.tensor(x_input, dtype=torch.float)
 
             # --- B. Construct the Micro-Graph ---
-            # GraphSAGE needs edges. For a single transaction, we add a "Self-Loop".
-            # This connects the node to itself, allowing the math to run without crashing.
             edge_index = torch.tensor([[0], [0]], dtype=torch.long)
 
             # Create Data Object
@@ -113,8 +113,6 @@ with col2:
                 fraud_prob = probabilities[0, 1].item() # Probability of Class 1 (Fraud)
 
             # --- D. Display Results ---
-            
-            # 1. The Verdict
             if fraud_prob > 0.5:
                 st.error(f"🚨 **SUSPICIOUS TRANSACTION DETECTED**")
                 st.metric(label="Fraud Probability", value=f"{fraud_prob*100:.2f}%", delta="High Risk")
@@ -124,7 +122,6 @@ with col2:
 
             st.divider()
 
-            # 2. Visual Explanation (The "Why")
             st.subheader("🧠 How the GNN sees this:")
             
             viz_col1, viz_col2 = st.columns(2)
@@ -133,13 +130,12 @@ with col2:
                 st.markdown("**Local Features Used:**")
                 st.json({
                     "Amount": tx_amount,
-                    "Time Step": time_step,
+                    "Fee": fee,
                     "Neighbors (In)": in_degree,
                     "Neighbors (Out)": out_degree
                 })
             
             with viz_col2:
-                # Visualization of the inference mode
                 st.markdown("**Graph Topology Mode:**")
                 st.info("Inference Mode: **Single-Node Self-Loop**")
                 st.graphviz_chart('''
@@ -153,7 +149,4 @@ with col2:
                 st.caption("The model analyzes the transaction's features against its learned patterns of fraud rings.")
 
     else:
-        # Placeholder when nothing is running
         st.info("👈 Enter transaction details and click 'Analyze' to start the GNN inference.")
-        # Optional: Add an image of a network to make it look cool
-        # st.image("https://upload.wikimedia.org/wikipedia/commons/5/5b/Neuron_synapse.png", caption="Neural Network Concept")
