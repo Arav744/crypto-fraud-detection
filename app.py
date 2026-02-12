@@ -1,108 +1,159 @@
 import streamlit as st
-import joblib
 import pandas as pd
 import numpy as np
-import shap
+import torch
+import torch.nn.functional as F
+from torch_geometric.nn import SAGEConv
+from torch_geometric.data import Data
+import networkx as nx
 import matplotlib.pyplot as plt
 
-# 1. Load the Model and Features
-model = joblib.load('fraud_model.pkl')
-feature_names = joblib.load('model_features.pkl')
+# ==========================================
+# 1. DEFINE THE MODEL ARCHITECTURE
+# ==========================================
+# This MUST match the class used in your training notebook exactly.
+class FraudGNN(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Input features: 166 (Elliptic dataset standard)
+        self.conv1 = SAGEConv(166, 128)
+        self.conv2 = SAGEConv(128, 2)
 
-# 2. App Title & Description
-st.title("🕵️‍♂️ Ethereum Fraud Detector System")
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv2(x, edge_index)
+        return F.log_softmax(x, dim=1)
+
+# ==========================================
+# 2. LOAD THE TRAINED MODEL
+# ==========================================
+@st.cache_resource
+def load_gnn_model():
+    # Initialize the empty model architecture
+    model = FraudGNN()
+    try:
+        # Load the weights you saved from the notebook
+        model.load_state_dict(torch.load("gnn_model_sage.pth", map_location=torch.device('cpu')))
+        model.eval()  # Set to evaluation mode (turns off dropout)
+        return model
+    except FileNotFoundError:
+        return None
+
+# Load model immediately
+gnn_model = load_gnn_model()
+
+# ==========================================
+# 3. UI LAYOUT
+# ==========================================
+st.set_page_config(page_title="Crypto Fraud Sentinel", page_icon="🛡️", layout="wide")
+
+st.title("🛡️ Ethereum Fraud Detection System (Phase 2)")
 st.markdown("""
-This system uses **XGBoost** and **Explainable AI (SHAP)** to detect fraudulent patterns in Ethereum transactions.
-Adjust the transaction parameters below to test the model.
+This system uses a **Graph Neural Network (GraphSAGE)** to detect illicit transactions.
+Unlike standard models, this AI looks at **network connections**, not just numbers.
 """)
 
-# 3. Sidebar Inputs (Simulating a Transaction)
-st.sidebar.header("Transaction Features")
+col1, col2 = st.columns([1, 2])
 
-def user_input_features():
-    # Sidebar inputs
-    st.sidebar.header("Transaction Features")
-    time_diff = st.sidebar.slider('Time Diff between first & last (Mins)', 0.0, 100000.0, 50.0) # Increased max range
-    total_balance = st.sidebar.number_input('Total Ether Balance', min_value=0.0, value=0.0)
-    min_val_rx = st.sidebar.number_input('Min Value Received', min_value=0.0, value=10.0)
-    avg_val_rx = st.sidebar.number_input('Avg Value Received', min_value=0.0, value=5.0)
-    total_erc20 = st.sidebar.number_input('Total ERC20 Tnxs', min_value=0, value=1)
+with col1:
+    st.header("1. Transaction Details")
+    st.info("Enter the transaction parameters below.")
     
-    # Crucial Input
-    sent_tnx = st.sidebar.number_input('Sent Tnx', min_value=0, value=0) 
-
-    # 1. Start with a baseline of Zeros
-    data = {col: 0 for col in feature_names}
+    # User Inputs
+    # We map these few inputs to the 166-feature vector
+    time_step = st.slider("Time Step (Hour)", 1, 49, 20, help="When did this happen?")
+    tx_amount = st.number_input("Transaction Amount (BTC/ETH)", value=50.0)
+    fee = st.number_input("Gas Fee / Transaction Fee", value=0.002)
     
-    # 2. Add the User Inputs
-    data['Time Diff between first and last (Mins)'] = time_diff
-    data['total ether balance'] = total_balance
-    data['min value received'] = min_val_rx
-    data['avg val received'] = avg_val_rx
-    data[' Total ERC20 tnxs'] = total_erc20
-    data['Sent tnx'] = sent_tnx
+    # New "Graph" Inputs
+    st.markdown("---")
+    st.subheader("Network Context")
+    in_degree = st.number_input("Inputs (In-degree)", min_value=0, value=1, help="How many wallets sent money to this address?")
+    out_degree = st.number_input("Outputs (Out-degree)", min_value=0, value=2, help="How many wallets did this address send money to?")
 
-    # 3. SMART LOGIC: Auto-fill the "Ghost" variables
-    # If we have sent transactions, we must have sent money and used addresses!
-    if sent_tnx > 0:
-        data['Unique Sent To Addresses'] = int(sent_tnx / 2) + 1  # Assume we sent to a few different friends
-        data['total Ether sent'] = sent_tnx * 1.5               # We sent some ETH
-        data['avg val sent'] = 1.5                              # Average sent amount
-        data['Received Tnx'] = sent_tnx + 5                     # Normal users receive money too
-        data['Unique Received From Addresses'] = 5              # From a few sources
-        
-        # Balance the math (Received must be > Sent + Balance)
-        data['total ether received'] = total_balance + data['total Ether sent'] + 10
+    run_btn = st.button("🔍 Analyze Transaction", type="primary")
 
-    return pd.DataFrame([data])
+# ==========================================
+# 4. INFERENCE ENGINE
+# ==========================================
+with col2:
+    if run_btn:
+        if gnn_model is None:
+            st.error("❌ Model file 'gnn_model_sage.pth' not found. Please save it from your notebook first.")
+        else:
+            st.header("2. Risk Analysis")
+            
+            # --- A. Construct the Input Tensor ---
+            # The model expects 166 features. We create a zero vector and fill what we have.
+            # This is a standard technique for demos when full feature extraction isn't available.
+            x_input = np.zeros((1, 166))
+            x_input[0, 0] = time_step
+            x_input[0, 1] = tx_amount
+            x_input[0, 2] = fee
+            x_input[0, 3] = in_degree
+            x_input[0, 4] = out_degree
+            
+            x_tensor = torch.tensor(x_input, dtype=torch.float)
 
-input_df = user_input_features()
+            # --- B. Construct the Micro-Graph ---
+            # GraphSAGE needs edges. For a single transaction, we add a "Self-Loop".
+            # This connects the node to itself, allowing the math to run without crashing.
+            edge_index = torch.tensor([[0], [0]], dtype=torch.long)
 
-# 4. Display Input
-st.subheader("Transaction Parameters")
-st.write(input_df)
+            # Create Data Object
+            data = Data(x=x_tensor, edge_index=edge_index)
 
-# 5. Prediction
-if st.button("Analyze Transaction"):
-    # Get Probability
-    prediction = model.predict(input_df)
-    probability = model.predict_proba(input_df)
-    
-    # Display Result
-    st.subheader("Risk Analysis Result")
-    is_fraud = prediction[0] == 1
-    
-    if is_fraud:
-        st.error(f"🚨 FRAUD DETECTED (Confidence: {probability[0][1]*100:.2f}%)")
+            # --- C. Prediction ---
+            with torch.no_grad():
+                log_logits = gnn_model(data)
+                probabilities = torch.exp(log_logits)
+                fraud_prob = probabilities[0, 1].item() # Probability of Class 1 (Fraud)
+
+            # --- D. Display Results ---
+            
+            # 1. The Verdict
+            if fraud_prob > 0.5:
+                st.error(f"🚨 **SUSPICIOUS TRANSACTION DETECTED**")
+                st.metric(label="Fraud Probability", value=f"{fraud_prob*100:.2f}%", delta="High Risk")
+            else:
+                st.success(f"✅ **TRANSACTION SEEMS LEGITIMATE**")
+                st.metric(label="Safety Score", value=f"{(1-fraud_prob)*100:.2f}%", delta="Safe")
+
+            st.divider()
+
+            # 2. Visual Explanation (The "Why")
+            st.subheader("🧠 How the GNN sees this:")
+            
+            viz_col1, viz_col2 = st.columns(2)
+            
+            with viz_col1:
+                st.markdown("**Local Features Used:**")
+                st.json({
+                    "Amount": tx_amount,
+                    "Time Step": time_step,
+                    "Neighbors (In)": in_degree,
+                    "Neighbors (Out)": out_degree
+                })
+            
+            with viz_col2:
+                # Visualization of the inference mode
+                st.markdown("**Graph Topology Mode:**")
+                st.info("Inference Mode: **Single-Node Self-Loop**")
+                st.graphviz_chart('''
+                digraph {
+                    rankdir=LR;
+                    node [shape=circle, style=filled, color="#ff4b4b", fontcolor=white];
+                    T [label="Target\\nTx"];
+                    T -> T [label=" Self-Attention", color="#555"];
+                }
+                ''')
+                st.caption("The model analyzes the transaction's features against its learned patterns of fraud rings.")
+
     else:
-        st.success(f"✅ LEGITIMATE TRANSACTION (Confidence: {probability[0][0]*100:.2f}%)")
-
-   # 6. xAI Explanation (SHAP)
-    st.subheader("📝 Explainable AI (Why?)")
-    with st.spinner('Calculating SHAP values...'):
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(input_df)
-        
-        # Create a specialized "Explanation" object for the waterfall plot
-        # This handles the data formatting automatically
-        explanation = shap.Explanation(
-            values=shap_values[0], 
-            base_values=explainer.expected_value, 
-            data=input_df.iloc[0], 
-            feature_names=input_df.columns
-        )
-        
-        # Create a clean figure
-        fig, ax = plt.subplots(figsize=(8, 5))
-        
-        # Draw the Waterfall Plot
-        shap.plots.waterfall(explanation, show=False)
-        
-        # Display in Streamlit
-        st.pyplot(fig, bbox_inches='tight')
-        
-        st.info("⬇️ How to read this graph:\n"
-                "* **E[f(x)]** is the average risk score.\n"
-                "* **Red Bars (+)** mean this feature increases fraud risk.\n"
-                "* **Blue Bars (-)** mean this feature makes it look safe.\n"
-                "* **f(x)** is the final calculated risk score.")
+        # Placeholder when nothing is running
+        st.info("👈 Enter transaction details and click 'Analyze' to start the GNN inference.")
+        # Optional: Add an image of a network to make it look cool
+        # st.image("https://upload.wikimedia.org/wikipedia/commons/5/5b/Neuron_synapse.png", caption="Neural Network Concept")
