@@ -317,59 +317,57 @@ def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
         except Exception:
             return 0.0
 
-    # List of (computed_value, exact_column_name_from_model_features_pkl)
-    # Each entry is independent — no key collisions possible.
+    # Exact column names from model_features.pkl — order matches ALL_model_features
     mappings = [
-        # ── Time features ──────────────────────────────────────────────
+        # ── ETH transaction time features ──────────────────────────────
         (safe((df["time_step"].max() - df["time_step"].min()) * 60),
             "Time Diff between first and last (Mins)"),
         (safe(sent_rows["time_step"].diff().mean() * 60) if len(sent_rows) > 1 else 0.0,
             "Avg min between sent tnx"),
         (safe(recv_rows["time_step"].diff().mean() * 60) if len(recv_rows) > 1 else 0.0,
             "Avg min between received tnx"),
-        # ── Count features ─────────────────────────────────────────────
-        (safe(len(sent_rows)),          "Sent tnx"),
-        (safe(len(recv_rows)),          "Received Tnx"),
-        (0.0,                           "Number of Created Contracts"),
-        (safe(recv_rows["sender"].nunique()),   "Unique Received From Addresses"),
-        (safe(sent_rows["receiver"].nunique()), "Unique Sent To Addresses"),
-        # ── Received amount features ────────────────────────────────────
-        (safe(recv_rows["amount"].min())  if len(recv_rows) else 0.0, "min value received"),
-        (safe(recv_rows["amount"].max())  if len(recv_rows) else 0.0, "max value received "),  # trailing space intentional
+        # ── ETH transaction counts ──────────────────────────────────────
+        (safe(len(sent_rows)),                          "Sent tnx"),
+        (safe(len(recv_rows)),                          "Received Tnx"),
+        (0.0,                                           "Number of Created Contracts"),
+        (safe(recv_rows["sender"].nunique()),           "Unique Received From Addresses"),
+        (safe(sent_rows["receiver"].nunique()),         "Unique Sent To Addresses"),
+        # ── ETH received amounts ────────────────────────────────────────
+        (safe(recv_rows["amount"].min()) if len(recv_rows) else 0.0,  "min value received"),
+        (safe(recv_rows["amount"].max()) if len(recv_rows) else 0.0,  "max value received "),  # trailing space — exact
         (safe(recv_rows["amount"].mean()) if len(recv_rows) else 0.0, "avg val received"),
-        (safe(recv_rows["amount"].sum()),  "total ether received"),
-        # ── Sent amount features ────────────────────────────────────────
-        (safe(sent_rows["amount"].min())  if len(sent_rows) else 0.0, "min val sent"),
-        (safe(sent_rows["amount"].max())  if len(sent_rows) else 0.0, "max val sent"),
+        # ── ETH sent amounts ────────────────────────────────────────────
+        (safe(sent_rows["amount"].min()) if len(sent_rows) else 0.0,  "min val sent"),
+        (safe(sent_rows["amount"].max()) if len(sent_rows) else 0.0,  "max val sent"),
         (safe(sent_rows["amount"].mean()) if len(sent_rows) else 0.0, "avg val sent"),
-        (safe(sent_rows["amount"].sum()),  "total Ether sent"),
-        # ── Balance ─────────────────────────────────────────────────────
+        # ── ETH sent-to-contract (no contract data — always 0) ──────────
+        (0.0,  "min value sent to contract"),
+        (0.0,  "max val sent to contract"),
+        (0.0,  "avg value sent to contract"),
+        # ── ETH totals ──────────────────────────────────────────────────
+        (safe(len(sent_rows) + len(recv_rows)),
+            "total transactions (including tnx to create contract"),   # exact — no closing paren
+        (safe(sent_rows["amount"].sum()),               "total Ether sent"),
+        (safe(recv_rows["amount"].sum()),               "total ether received"),
+        (0.0,                                           "total ether sent contracts"),
         (safe(recv_rows["amount"].sum() - sent_rows["amount"].sum()), "total ether balance"),
-        # ── ERC20 placeholders (we have no token data — leave 0) ────────
-        (0.0, "ERC20 total Ether received"),
-        (0.0, "ERC20 total ether sent"),
-        (0.0, "ERC20 total Ether sent contract"),
-        (0.0, "ERC20 uniq sent addr"),
-        (0.0, "ERC20 uniq rec addr"),
-        (0.0, "ERC20 uniq sent addr.1"),
-        (0.0, "ERC20 uniq rec contract addr"),
-        (0.0, "ERC20 avg time between sent tnx"),
-        (0.0, "ERC20 avg time between rec tnx"),
-        (0.0, "ERC20 avg time between rec 2 tnx"),
-        (0.0, "ERC20 avg time between contract tnx"),
-        (0.0, "ERC20 min val sent"),
-        (0.0, "ERC20 max val sent"),
-        (0.0, "ERC20 avg val sent"),
-        (0.0, "ERC20 min val sent contract"),
-        (0.0, "ERC20 max val sent contract"),
-        (0.0, "ERC20 avg val sent contract"),
-        (0.0, "ERC20 min val rec"),
-        (0.0, "ERC20 max val rec"),
-        (0.0, "ERC20 avg val rec"),
-        (0.0, "ERC20 uniq sent token name"),
-        (0.0, "ERC20 uniq rec token name"),
-        (0.0, "ERC20 most sent token type"),
-        (0.0, "ERC20 most rec token type"),
+        # ── ERC20 features — all have a leading space (exact from pkl) ──
+        (0.0,  " Total ERC20 tnxs"),
+        (0.0,  " ERC20 total Ether received"),
+        (0.0,  " ERC20 total ether sent"),
+        (0.0,  " ERC20 total Ether sent contract"),
+        (0.0,  " ERC20 uniq sent addr"),
+        (0.0,  " ERC20 uniq rec addr"),
+        (0.0,  " ERC20 uniq sent addr.1"),
+        (0.0,  " ERC20 uniq rec contract addr"),
+        (0.0,  " ERC20 min val rec"),
+        (0.0,  " ERC20 max val rec"),
+        (0.0,  " ERC20 avg val rec"),
+        (0.0,  " ERC20 min val sent"),
+        (0.0,  " ERC20 max val sent"),
+        (0.0,  " ERC20 avg val sent"),
+        (0.0,  " ERC20 uniq sent token name"),
+        (0.0,  " ERC20 uniq rec token name"),
     ]
 
     row = pd.DataFrame(
