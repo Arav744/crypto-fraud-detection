@@ -29,7 +29,11 @@ import joblib
 # ---------------------------------------------------------------------------
 # 0. CONSTANTS
 # ---------------------------------------------------------------------------
-DB_PATH = "transactions.db"
+# Use an absolute path so the DB persists regardless of working directory.
+# On Streamlit Cloud, use /tmp (survives restarts but not redeploys).
+# Locally, store next to app.py so it always survives app restarts.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH  = os.path.join(_APP_DIR, "transactions.db")
 GNN_FEATURES = 165   # must match training
 GNN_HIDDEN   = 128
 GNN_CLASSES  = 2
@@ -295,16 +299,53 @@ def load_xgb():
 # ---------------------------------------------------------------------------
 # 5. XGBoost INFERENCE  (uses model_features.pkl to align columns)
 # ---------------------------------------------------------------------------
-def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray) -> float:
+def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
+                G: nx.DiGraph, df: pd.DataFrame, wallet: str) -> float:
     """
-    Map our 165-dim feature vector onto the XGBoost feature names.
-    We align the first min(165, len(feature_names)) features and zero-pad.
+    Build a feature row that matches what fraud_model.pkl was trained on.
+    The Ethereum XGBoost model (06_ethereum_xgboost.ipynb) uses address-level
+    aggregates — we reconstruct the ones we can from the live graph.
+    Any column we cannot compute is left at 0 (neutral/mean-imputed).
     """
-    row = np.zeros((1, len(feature_names)), dtype=np.float32)
-    copy_len = min(GNN_FEATURES, len(feature_names))
-    row[0, :copy_len] = feat_vec[:copy_len]
-    df_row = pd.DataFrame(row, columns=feature_names)
-    prob = xgb_model.predict_proba(df_row)[0, 1]
+    # Start with zeros for all features the model knows
+    row = pd.DataFrame(
+        np.zeros((1, len(feature_names)), dtype=np.float32),
+        columns=feature_names
+    )
+
+    # Map our graph-derived values onto matching column names
+    sent_rows = df[df["sender"] == wallet]
+    recv_rows = df[df["receiver"] == wallet]
+
+    mappings = {
+        # common Ethereum dataset column names → our computed values
+        "Time Diff between first and last Mins":
+            float(df["time_step"].max() - df["time_step"].min()) * 60,
+        "Avg min between sent tnx":
+            float(sent_rows["time_step"].diff().mean() * 60) if len(sent_rows) > 1 else 0,
+        "Avg min between received tnx":
+            float(recv_rows["time_step"].diff().mean() * 60) if len(recv_rows) > 1 else 0,
+        "Sent tnx":             float(len(sent_rows)),
+        "Received Tnx":         float(len(recv_rows)),
+        "Number of Created Contracts": 0.0,
+        "Unique Received From Addresses": float(recv_rows["sender"].nunique()),
+        "Unique Sent To Addresses":       float(sent_rows["receiver"].nunique()),
+        "min value received":   float(recv_rows["amount"].min()) if len(recv_rows) else 0,
+        "max value received":   float(recv_rows["amount"].max()) if len(recv_rows) else 0,
+        "avg val received":     float(recv_rows["amount"].mean()) if len(recv_rows) else 0,
+        "min val sent":         float(sent_rows["amount"].min()) if len(sent_rows) else 0,
+        "max val sent":         float(sent_rows["amount"].max()) if len(sent_rows) else 0,
+        "avg val sent":         float(sent_rows["amount"].mean()) if len(sent_rows) else 0,
+        "total Ether sent":     float(sent_rows["amount"].sum()),
+        "total ether received": float(recv_rows["amount"].sum()),
+        "total ether balance":  float(recv_rows["amount"].sum() - sent_rows["amount"].sum()),
+    }
+
+    for col, val in mappings.items():
+        if col in row.columns:
+            row[col] = val if np.isfinite(val) else 0.0
+
+    prob = xgb_model.predict_proba(row)[0, 1]
     return float(prob)
 
 
@@ -487,30 +528,52 @@ with tab_submit:
         st.subheader("📊 Risk Analysis")
 
         # ── GNN prediction ────────────────────────────────────────────────
-        gnn_prob = None
+        # IMPORTANT: GNN is only meaningful when the graph has enough nodes
+        # to aggregate real neighbourhood information.  With < 10 nodes the
+        # feature distribution is so far from the Elliptic training set that
+        # outputs are unreliable → we skip it and rely on XGBoost instead.
+        GNN_MIN_NODES = 10
+        gnn_prob      = None
+        gnn_skipped   = False
+
         if gnn_model is not None:
-            with st.spinner("Running GNN on the transaction graph…"):
-                try:
-                    data_pyg, tgt_idx = graph_to_pyg(G, df_with_new, sender.strip())
-                    with torch.no_grad():
-                        log_logits  = gnn_model(data_pyg)
-                        probs       = torch.exp(log_logits)
-                        gnn_prob    = probs[tgt_idx, 1].item()
-                except Exception as e:
-                    st.warning(f"GNN inference failed: {e}")
+            if G.number_of_nodes() < GNN_MIN_NODES:
+                gnn_skipped = True
+            else:
+                with st.spinner("Running GNN on the transaction graph…"):
+                    try:
+                        data_pyg, tgt_idx = graph_to_pyg(G, df_with_new, sender.strip())
+                        with torch.no_grad():
+                            log_logits = gnn_model(data_pyg)
+                            probs      = torch.exp(log_logits)
+                            gnn_prob   = probs[tgt_idx, 1].item()
+                    except Exception as e:
+                        st.warning(f"GNN inference failed: {e}")
 
         # ── XGBoost prediction ────────────────────────────────────────────
+        # XGBoost is the PRIMARY model — it works well even on small graphs
+        # because it operates on per-node features, not graph structure.
         xgb_prob = None
         if xgb_model is not None:
             try:
-                feat_vec = wallet_node_features(sender.strip(), G, df_with_new)
-                xgb_prob = xgb_predict(xgb_model, xgb_features, feat_vec)
+                xgb_prob = xgb_predict(
+                    xgb_model, xgb_features,
+                    wallet_node_features(sender.strip(), G, df_with_new),
+                    G, df_with_new, sender.strip()
+                )
             except Exception as e:
                 st.warning(f"XGBoost inference failed: {e}")
 
-        # ── Ensemble score (simple average of available models) ───────────
-        available = [p for p in [gnn_prob, xgb_prob] if p is not None]
-        ensemble  = float(np.mean(available)) if available else None
+        # ── Ensemble: weight XGBoost 70 %, GNN 30 % once graph is big enough
+        # When GNN is skipped, use XGBoost only.
+        if gnn_prob is not None and xgb_prob is not None:
+            ensemble = 0.3 * gnn_prob + 0.7 * xgb_prob
+        elif xgb_prob is not None:
+            ensemble = xgb_prob
+        elif gnn_prob is not None:
+            ensemble = gnn_prob
+        else:
+            ensemble = None
 
         # ── Display results ───────────────────────────────────────────────
         res_cols = st.columns(3)
@@ -537,6 +600,13 @@ with tab_submit:
                           delta_color="inverse")
             else:
                 st.metric("Ensemble Score", "N/A")
+
+        if gnn_skipped:
+            st.info(
+                f"ℹ️ GNN skipped — graph has only {G.number_of_nodes()} nodes "
+                f"(needs ≥ {GNN_MIN_NODES}). Add more transactions to activate it. "
+                "Using XGBoost only for now."
+            )
 
         if ensemble is not None:
             if ensemble > 0.5:
