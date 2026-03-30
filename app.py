@@ -300,53 +300,89 @@ def load_xgb():
 # 5. XGBoost INFERENCE  (uses model_features.pkl to align columns)
 # ---------------------------------------------------------------------------
 def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
-                G: nx.DiGraph, df: pd.DataFrame, wallet: str) -> float:
+                G: nx.DiGraph, df: pd.DataFrame, wallet: str) -> tuple[float | None, dict]:
     """
-    Build a feature row that matches what fraud_model.pkl was trained on.
-    The Ethereum XGBoost model (06_ethereum_xgboost.ipynb) uses address-level
-    aggregates — we reconstruct the ones we can from the live graph.
-    Any column we cannot compute is left at 0 (neutral/mean-imputed).
+    Build a feature row matching fraud_model.pkl's training columns.
+    Returns (probability, debug_dict).
+    Returns (None, debug_dict) if no columns matched — avoids garbage predictions.
     """
-    # Start with zeros for all features the model knows
+    sent_rows = df[df["sender"]   == wallet]
+    recv_rows = df[df["receiver"] == wallet]
+
+    # Every plausible alias for each value, covering common Ethereum dataset variants
+    value_map = {
+        # Time-based
+        float(df["time_step"].max() - df["time_step"].min()) * 60: [
+            "Time Diff between first and last Mins",
+            "time_diff_first_last_mins", "TimeDiff"],
+        float(sent_rows["time_step"].diff().mean() * 60) if len(sent_rows) > 1 else 0.0: [
+            "Avg min between sent tnx", "avg_min_between_sent_tnx"],
+        float(recv_rows["time_step"].diff().mean() * 60) if len(recv_rows) > 1 else 0.0: [
+            "Avg min between received tnx", "avg_min_between_received_tnx"],
+        # Counts
+        float(len(sent_rows)): [
+            "Sent tnx", "sent_tnx", "num_sent", "n_sent"],
+        float(len(recv_rows)): [
+            "Received Tnx", "received_tnx", "num_received", "n_received"],
+        float(recv_rows["sender"].nunique()): [
+            "Unique Received From Addresses", "unique_received_from",
+            "unique_received_from_addresses"],
+        float(sent_rows["receiver"].nunique()): [
+            "Unique Sent To Addresses", "unique_sent_to",
+            "unique_sent_to_addresses"],
+        0.0: ["Number of Created Contracts", "created_contracts"],
+        # Amounts received
+        float(recv_rows["amount"].min())  if len(recv_rows) else 0.0: [
+            "min value received", "min_value_received"],
+        float(recv_rows["amount"].max())  if len(recv_rows) else 0.0: [
+            "max value received", "max_value_received"],
+        float(recv_rows["amount"].mean()) if len(recv_rows) else 0.0: [
+            "avg val received", "avg_value_received", "avg_val_received"],
+        float(recv_rows["amount"].sum()): [
+            "total ether received", "total_ether_received",
+            "total Ether received", "totalEtherReceived"],
+        # Amounts sent
+        float(sent_rows["amount"].min())  if len(sent_rows) else 0.0: [
+            "min val sent", "min_val_sent", "min_value_sent"],
+        float(sent_rows["amount"].max())  if len(sent_rows) else 0.0: [
+            "max val sent", "max_val_sent", "max_value_sent"],
+        float(sent_rows["amount"].mean()) if len(sent_rows) else 0.0: [
+            "avg val sent", "avg_val_sent", "avg_value_sent"],
+        float(sent_rows["amount"].sum()): [
+            "total Ether sent", "total_ether_sent",
+            "total ether sent", "totalEtherSent"],
+        # Balance
+        float(recv_rows["amount"].sum() - sent_rows["amount"].sum()): [
+            "total ether balance", "total_ether_balance",
+            "ERC20 total Ether received", "balance"],
+    }
+
     row = pd.DataFrame(
         np.zeros((1, len(feature_names)), dtype=np.float32),
         columns=feature_names
     )
 
-    # Map our graph-derived values onto matching column names
-    sent_rows = df[df["sender"] == wallet]
-    recv_rows = df[df["receiver"] == wallet]
+    matched_cols = []
+    for value, aliases in value_map.items():
+        for alias in aliases:
+            if alias in row.columns:
+                row[alias] = float(value) if np.isfinite(float(value)) else 0.0
+                matched_cols.append(alias)
+                break   # found this value's column — move to next value
 
-    mappings = {
-        # common Ethereum dataset column names → our computed values
-        "Time Diff between first and last Mins":
-            float(df["time_step"].max() - df["time_step"].min()) * 60,
-        "Avg min between sent tnx":
-            float(sent_rows["time_step"].diff().mean() * 60) if len(sent_rows) > 1 else 0,
-        "Avg min between received tnx":
-            float(recv_rows["time_step"].diff().mean() * 60) if len(recv_rows) > 1 else 0,
-        "Sent tnx":             float(len(sent_rows)),
-        "Received Tnx":         float(len(recv_rows)),
-        "Number of Created Contracts": 0.0,
-        "Unique Received From Addresses": float(recv_rows["sender"].nunique()),
-        "Unique Sent To Addresses":       float(sent_rows["receiver"].nunique()),
-        "min value received":   float(recv_rows["amount"].min()) if len(recv_rows) else 0,
-        "max value received":   float(recv_rows["amount"].max()) if len(recv_rows) else 0,
-        "avg val received":     float(recv_rows["amount"].mean()) if len(recv_rows) else 0,
-        "min val sent":         float(sent_rows["amount"].min()) if len(sent_rows) else 0,
-        "max val sent":         float(sent_rows["amount"].max()) if len(sent_rows) else 0,
-        "avg val sent":         float(sent_rows["amount"].mean()) if len(sent_rows) else 0,
-        "total Ether sent":     float(sent_rows["amount"].sum()),
-        "total ether received": float(recv_rows["amount"].sum()),
-        "total ether balance":  float(recv_rows["amount"].sum() - sent_rows["amount"].sum()),
+    debug = {
+        "total_model_features": len(feature_names),
+        "matched_columns": len(matched_cols),
+        "matched_names": matched_cols,
+        "first_10_model_features": list(feature_names[:10]),
     }
 
-    for col, val in mappings.items():
-        if col in row.columns:
-            row[col] = val if np.isfinite(val) else 0.0
+    # If we matched nothing, don't trust the prediction
+    if len(matched_cols) == 0:
+        return None, debug
 
     prob = xgb_model.predict_proba(row)[0, 1]
-    return float(prob)
+    return float(prob), debug
 
 
 # ---------------------------------------------------------------------------
@@ -553,14 +589,21 @@ with tab_submit:
         # ── XGBoost prediction ────────────────────────────────────────────
         # XGBoost is the PRIMARY model — it works well even on small graphs
         # because it operates on per-node features, not graph structure.
-        xgb_prob = None
+        xgb_prob  = None
+        xgb_debug = {}
         if xgb_model is not None:
             try:
-                xgb_prob = xgb_predict(
+                xgb_prob, xgb_debug = xgb_predict(
                     xgb_model, xgb_features,
                     wallet_node_features(sender.strip(), G, df_with_new),
                     G, df_with_new, sender.strip()
                 )
+                if xgb_prob is None:
+                    st.warning(
+                        "⚠️ XGBoost skipped — none of the model's feature "
+                        "column names matched our computed features. "
+                        "Check the debug expander below to see the actual names."
+                    )
             except Exception as e:
                 st.warning(f"XGBoost inference failed: {e}")
 
@@ -632,6 +675,19 @@ with tab_submit:
                 "xgboost_fraud_probability": round(xgb_prob, 4) if xgb_prob is not None else None,
                 "ensemble_fraud_probability": round(ensemble, 4) if ensemble is not None else None,
             })
+
+        # ── CRITICAL DEBUG: show actual XGBoost feature names ─────────────
+        if xgb_debug:
+            with st.expander(
+                "🛠️ XGBoost feature name debug "
+                f"({xgb_debug.get('matched_columns', 0)}"
+                f"/{xgb_debug.get('total_model_features', '?')} columns matched)"
+            ):
+                st.caption(
+                    "If matched_columns = 0, copy the feature names below "
+                    "and tell me — I'll fix the mapping immediately."
+                )
+                st.json(xgb_debug)
 
         # ── Persist to database ────────────────────────────────────────────
         tx_hash = insert_transaction({
