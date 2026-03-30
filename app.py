@@ -313,7 +313,8 @@ def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
     value_map = {
         # Time-based
         float(df["time_step"].max() - df["time_step"].min()) * 60: [
-            "Time Diff between first and last Mins",
+            "Time Diff between first and last (Mins)",   # exact name with parentheses
+            "Time Diff between first and last Mins",     # fallback without
             "time_diff_first_last_mins", "TimeDiff"],
         float(sent_rows["time_step"].diff().mean() * 60) if len(sent_rows) > 1 else 0.0: [
             "Avg min between sent tnx", "avg_min_between_sent_tnx"],
@@ -335,7 +336,9 @@ def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
         float(recv_rows["amount"].min())  if len(recv_rows) else 0.0: [
             "min value received", "min_value_received"],
         float(recv_rows["amount"].max())  if len(recv_rows) else 0.0: [
-            "max value received", "max_value_received"],
+            "max value received ",          # exact name — trailing space is real
+            "max value received",           # fallback without space
+            "max_value_received"],
         float(recv_rows["amount"].mean()) if len(recv_rows) else 0.0: [
             "avg val received", "avg_value_received", "avg_val_received"],
         float(recv_rows["amount"].sum()): [
