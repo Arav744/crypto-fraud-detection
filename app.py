@@ -1,23 +1,20 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv
 from torch_geometric.data import Data
 import pickle
-import shap
-import matplotlib.pyplot as plt
 import networkx as nx
 
 # ==========================================
-# 1. MODEL DEFINITIONS
+# 1. MODEL
 # ==========================================
 class FraudGNN(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv1 = SAGEConv(2, 32)   # FIXED: now using REAL features (2 features)
-        self.conv2 = SAGEConv(32, 2)
+        self.conv1 = SAGEConv(165, 128)
+        self.conv2 = SAGEConv(128, 2)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
@@ -31,7 +28,6 @@ class FraudGNN(torch.nn.Module):
 def load_models():
     models = {}
 
-    # Load GNN
     try:
         gnn = FraudGNN()
         gnn.load_state_dict(torch.load("gnn_model_sage.pth", map_location="cpu"))
@@ -40,7 +36,6 @@ def load_models():
     except:
         models["gnn"] = None
 
-    # Load XGBoost
     try:
         with open("fraud_model.pkl", "rb") as f:
             models["xgb"] = pickle.load(f)
@@ -53,53 +48,22 @@ def load_models():
 models = load_models()
 
 # ==========================================
-# 2. PERSISTENT GRAPH
+# 2. INITIAL GRAPH (IMPORTANT)
 # ==========================================
-if "graph" not in st.session_state:
-    st.session_state.graph = nx.DiGraph()
+if "data" not in st.session_state:
+    # Initialize empty graph
+    st.session_state.data = Data(
+        x=torch.zeros((1, 165), dtype=torch.float),
+        edge_index=torch.tensor([[0], [0]], dtype=torch.long)
+    )
 
-G = st.session_state.graph
-
-# ==========================================
-# 3. FEATURE EXTRACTION
-# ==========================================
-def extract_features(G):
-    pagerank = nx.pagerank(G) if len(G.nodes) > 0 else {}
-    features = []
-
-    for node in G.nodes:
-        features.append([
-            G.degree(node),                 # degree
-            pagerank.get(node, 0.0)         # pagerank
-        ])
-
-    return torch.tensor(features, dtype=torch.float)
-
+data = st.session_state.data
 
 # ==========================================
-# 4. BUILD GRAPH DATA FOR GNN
-# ==========================================
-def build_pyg_data(G):
-    nodes = list(G.nodes)
-    node_to_idx = {n: i for i, n in enumerate(nodes)}
-
-    edges = [(node_to_idx[u], node_to_idx[v]) for u, v in G.edges]
-
-    if len(edges) == 0:
-        edge_index = torch.tensor([[0], [0]], dtype=torch.long)
-    else:
-        edge_index = torch.tensor(edges).t().contiguous()
-
-    x = extract_features(G)
-
-    return Data(x=x, edge_index=edge_index), node_to_idx
-
-
-# ==========================================
-# 5. UI
+# 3. UI
 # ==========================================
 st.set_page_config(page_title="Crypto Fraud Sentinel", layout="wide")
-st.title("🛡️ Real-Time Crypto Fraud Detection System")
+st.title("🛡️ Crypto Fraud Detection (Real GNN + 165 Features)")
 
 with st.sidebar:
     st.header("Transaction Input")
@@ -107,52 +71,65 @@ with st.sidebar:
     sender = st.text_input("Sender Wallet", "A")
     receiver = st.text_input("Receiver Wallet", "B")
     amount = st.number_input("Transaction Amount", value=100.0)
+    fee = st.number_input("Gas Fee", value=0.001)
 
     run_btn = st.button("Analyze Transaction", type="primary")
 
-
 # ==========================================
-# 6. MAIN PIPELINE
+# 4. MAIN PIPELINE
 # ==========================================
 if run_btn:
 
-    # Add transaction to graph
-    G.add_edge(sender, receiver, weight=amount)
+    # -------- Add new node (transaction) --------
+    new_features = np.zeros(165)
 
-    # Build graph data
-    data, node_to_idx = build_pyg_data(G)
+    # VERY IMPORTANT: map real inputs to feature space
+    new_features[0] = amount / 1000.0
+    new_features[1] = fee / 0.01
 
-    # Get target node index
-    target_idx = node_to_idx[receiver]
+    new_tensor = torch.tensor(new_features, dtype=torch.float).unsqueeze(0)
 
-    # ---------------- GNN ----------------
+    # Append node
+    data.x = torch.cat([data.x, new_tensor], dim=0)
+
+    new_node_idx = data.x.shape[0] - 1
+
+    # -------- Add edges --------
+    # connect to previous node (simple realistic structure)
+    prev_node = new_node_idx - 1 if new_node_idx > 0 else 0
+
+    new_edges = torch.tensor([
+        [prev_node, new_node_idx],
+        [new_node_idx, prev_node]
+    ], dtype=torch.long)
+
+    data.edge_index = torch.cat([data.edge_index, new_edges], dim=1)
+
+    # -------- GNN Prediction --------
     p_gnn = 0.0
+    logits = None
+
     if models["gnn"]:
         with torch.no_grad():
             logits = models["gnn"](data)
             probs = torch.exp(logits)
-            p_gnn = probs[target_idx, 1].item()
+            p_gnn = probs[new_node_idx, 1].item()
 
-    # ---------------- XGBoost ----------------
+    # -------- XGBoost Prediction --------
     p_xgb = 0.0
-    if models["xgb"] and models["gnn"]:
-        embedding = logits.detach().numpy()[target_idx]
 
-    xgb_input = np.concatenate([
-        embedding,
-        [G.degree(receiver)]
-    ]).reshape(1, -1)
+    if models["xgb"]:
+        try:
+            xgb_input = new_features.reshape(1, -1)
+            p_xgb = models["xgb"].predict_proba(xgb_input)[0, 1]
+        except:
+            p_xgb = 0.0
 
-    try:
-        p_xgb = models["xgb"].predict_proba(xgb_input)[0, 1]
-    except:
-        p_xgb = 0.0
-
-    # ---------------- Final Score ----------------
+    # -------- Final Score --------
     final_score = (p_gnn + p_xgb) / 2
 
     # ==========================================
-    # 7. DISPLAY
+    # 5. DISPLAY
     # ==========================================
     c1, c2, c3 = st.columns(3)
 
@@ -162,31 +139,6 @@ if run_btn:
 
     st.divider()
 
-    # Graph visualization
-    st.subheader("📊 Transaction Network")
-    st.graphviz_chart(nx.nx_pydot.to_pydot(G).to_string())
-
-    # ==========================================
-    # 8. SHAP EXPLAINABILITY
-    # ==========================================
-    if models["xgb"]:
-        try:
-            explainer = shap.TreeExplainer(models["xgb"])
-
-            feature_names = ["emb_1", "emb_2", "degree"]
-            df = pd.DataFrame(xgb_input, columns=feature_names)
-
-            shap_values = explainer(df)
-
-            plt.clf()
-            shap.plots.bar(shap_values[0], show=False)
-
-            st.pyplot(plt.gcf())
-
-            st.info("""
-            🔴 Red → increases fraud risk  
-            🔵 Blue → decreases fraud risk  
-            """)
-
-        except Exception as e:
-            st.warning(f"SHAP error: {e}")
+    # Show graph size
+    st.write(f"Total Nodes: {data.x.shape[0]}")
+    st.write(f"Total Edges: {data.edge_index.shape[1]}")
