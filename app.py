@@ -135,19 +135,18 @@ if run_btn:
 
     # ---------------- XGBoost ----------------
     p_xgb = 0.0
-    if models["xgb"]:
+    if models["xgb"] and models["gnn"]:
         embedding = logits.detach().numpy()[target_idx]
 
-        # combine embedding + simple feature
-        xgb_input = np.concatenate([
-            embedding,
-            [G.degree(receiver)]
-        ]).reshape(1, -1)
+    xgb_input = np.concatenate([
+        embedding,
+        [G.degree(receiver)]
+    ]).reshape(1, -1)
 
-        try:
-            p_xgb = models["xgb"].predict_proba(xgb_input)[0, 1]
-        except:
-            p_xgb = 0.0
+    try:
+        p_xgb = models["xgb"].predict_proba(xgb_input)[0, 1]
+    except:
+        p_xgb = 0.0
 
     # ---------------- Final Score ----------------
     final_score = (p_gnn + p_xgb) / 2
