@@ -387,7 +387,7 @@ def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
         "total_model_features":  len(feature_names),
         "matched_columns":       len(matched_cols),
         "matched_names":         matched_cols,
-        "first_10_model_features": list(feature_names[:10]),
+        "ALL_model_features":    list(feature_names),   # full list for debugging
     }
 
     if len(matched_cols) == 0:
@@ -691,9 +691,10 @@ with tab_submit:
         # ── CRITICAL DEBUG: show actual XGBoost feature names ─────────────
         if xgb_debug:
             with st.expander(
-                "🛠️ XGBoost feature name debug "
+                "🛠️ XGBoost feature debug "
                 f"({xgb_debug.get('matched_columns', 0)}"
-                f"/{xgb_debug.get('total_model_features', '?')} columns matched)"
+                f"/{xgb_debug.get('total_model_features', '?')} columns matched) "
+                "— paste ALL_model_features here if < 38"
             ):
                 st.caption(
                     "If matched_columns = 0, copy the feature names below "
