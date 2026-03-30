@@ -8,15 +8,16 @@ from torch_geometric.data import Data
 import pickle
 import shap
 import matplotlib.pyplot as plt
+import networkx as nx
 
 # ==========================================
-# 1. CORE DEFINITIONS
+# 1. MODEL DEFINITIONS
 # ==========================================
 class FraudGNN(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv1 = SAGEConv(165, 128)
-        self.conv2 = SAGEConv(128, 2)
+        self.conv1 = SAGEConv(2, 32)   # FIXED: now using REAL features (2 features)
+        self.conv2 = SAGEConv(32, 2)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
@@ -25,135 +26,168 @@ class FraudGNN(torch.nn.Module):
         x = self.conv2(x, edge_index)
         return F.log_softmax(x, dim=1)
 
+
 @st.cache_resource
-def load_all_models():
-    m = {}
+def load_models():
+    models = {}
+
+    # Load GNN
     try:
         gnn = FraudGNN()
-        gnn.load_state_dict(torch.load("gnn_model_sage.pth", map_location=torch.device('cpu')))
+        gnn.load_state_dict(torch.load("gnn_model_sage.pth", map_location="cpu"))
         gnn.eval()
-        m['gnn'] = gnn
-    except: m['gnn'] = None
-    
+        models["gnn"] = gnn
+    except:
+        models["gnn"] = None
+
+    # Load XGBoost
     try:
         with open("fraud_model.pkl", "rb") as f:
-            m['xgb'] = pickle.load(f)
-    except: m['xgb'] = None
-    return m
+            models["xgb"] = pickle.load(f)
+    except:
+        models["xgb"] = None
 
-models = load_all_models()
+    return models
+
+
+models = load_models()
 
 # ==========================================
-# 2. UI HEADER & INPUTS
+# 2. PERSISTENT GRAPH
+# ==========================================
+if "graph" not in st.session_state:
+    st.session_state.graph = nx.DiGraph()
+
+G = st.session_state.graph
+
+# ==========================================
+# 3. FEATURE EXTRACTION
+# ==========================================
+def extract_features(G):
+    pagerank = nx.pagerank(G) if len(G.nodes) > 0 else {}
+    features = []
+
+    for node in G.nodes:
+        features.append([
+            G.degree(node),                 # degree
+            pagerank.get(node, 0.0)         # pagerank
+        ])
+
+    return torch.tensor(features, dtype=torch.float)
+
+
+# ==========================================
+# 4. BUILD GRAPH DATA FOR GNN
+# ==========================================
+def build_pyg_data(G):
+    nodes = list(G.nodes)
+    node_to_idx = {n: i for i, n in enumerate(nodes)}
+
+    edges = [(node_to_idx[u], node_to_idx[v]) for u, v in G.edges]
+
+    if len(edges) == 0:
+        edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+    else:
+        edge_index = torch.tensor(edges).t().contiguous()
+
+    x = extract_features(G)
+
+    return Data(x=x, edge_index=edge_index), node_to_idx
+
+
+# ==========================================
+# 5. UI
 # ==========================================
 st.set_page_config(page_title="Crypto Fraud Sentinel", layout="wide")
-st.title("🛡️ Advanced Hybrid Fraud Intelligence")
+st.title("🛡️ Real-Time Crypto Fraud Detection System")
 
 with st.sidebar:
-    st.header("Transaction Parameters")
-    tx_val = st.number_input("Transaction Value (ETH)", value=500.0)
-    gas_fee = st.number_input("Gas Fee", value=0.005, format="%.4f")
-    st.markdown("---")
-    st.header("Network Topology")
-    in_deg = st.number_input("In-Degree (Senders)", value=0)
-    out_deg = st.number_input("Out-Degree (Receivers)", value=0)
-    run_btn = st.button("Execute Deep Analysis", type="primary")
+    st.header("Transaction Input")
+
+    sender = st.text_input("Sender Wallet", "A")
+    receiver = st.text_input("Receiver Wallet", "B")
+    amount = st.number_input("Transaction Amount", value=100.0)
+
+    run_btn = st.button("Analyze Transaction", type="primary")
+
 
 # ==========================================
-# 3. DYNAMIC ANALYSIS ENGINE
+# 6. MAIN PIPELINE
 # ==========================================
 if run_btn:
-    # 1. Initialize variables
-    p_gnn, p_xgb = 0.0, 0.0
-    # Determine the exact feature count your XGBoost model expects
-    xgb_count = models['xgb'].n_features_in_ if models['xgb'] else 39
-    
-    # 2. Build Dynamic Graph (Reactive to Degrees)
-    num_nodes = 1 + in_deg + out_deg
-    gnn_features = np.zeros((num_nodes, 165))
-    
-    # Map Target Node (Node 0)
-    gnn_features[0, 0] = tx_val / 5000.0 
-    gnn_features[0, 1] = gas_fee / 0.1
-    
-    # Construct Edges dynamically
-    sources, targets = [], []
-    for i in range(1, in_deg + 1): # Senders
-        sources.append(i); targets.append(0)
-    for i in range(in_deg + 1, num_nodes): # Receivers
-        sources.append(0); targets.append(i)
 
-    edge_index = torch.tensor([sources, targets], dtype=torch.long) if sources else torch.tensor([[0],[0]], dtype=torch.long)
+    # Add transaction to graph
+    G.add_edge(sender, receiver, weight=amount)
 
-    # 3. GNN Inference
-    if models['gnn']:
+    # Build graph data
+    data, node_to_idx = build_pyg_data(G)
+
+    # Get target node index
+    target_idx = node_to_idx[receiver]
+
+    # ---------------- GNN ----------------
+    p_gnn = 0.0
+    if models["gnn"]:
         with torch.no_grad():
-            logits = models['gnn'](Data(x=torch.tensor(gnn_features, dtype=torch.float), edge_index=edge_index))
-            p_gnn = torch.exp(logits)[0, 1].item()
-    
-    # 4. XGBoost Inference - DEFINING xgb_input HERE
-    if models['xgb']:
-        # We extract only the target node's features for the XGBoost expert
-        xgb_input = gnn_features[0:1, :xgb_count]
-        p_xgb = models['xgb'].predict_proba(xgb_input)[0, 1]
+            logits = models["gnn"](data)
+            probs = torch.exp(logits)
+            p_gnn = probs[target_idx, 1].item()
 
-    blended_risk = (p_gnn * 0.5) + (p_xgb * 0.5)
+    # ---------------- XGBoost ----------------
+    p_xgb = 0.0
+    if models["xgb"]:
+        embedding = logits.detach().numpy()[target_idx]
+
+        # combine embedding + simple feature
+        xgb_input = np.concatenate([
+            embedding,
+            [G.degree(receiver)]
+        ]).reshape(1, -1)
+
+        try:
+            p_xgb = models["xgb"].predict_proba(xgb_input)[0, 1]
+        except:
+            p_xgb = 0.0
+
+    # ---------------- Final Score ----------------
+    final_score = (p_gnn + p_xgb) / 2
 
     # ==========================================
-    # 4. ENHANCED DASHBOARD DISPLAY
+    # 7. DISPLAY
     # ==========================================
-    m1, m2, m3 = st.columns(3)
-    m1.metric("GNN Topology Risk", f"{p_gnn*100:.1f}%")
-    m2.metric("XGBoost Local Risk", f"{p_xgb*100:.1f}%")
-    # Using 'blended_risk' now defined above
-    m3.metric("Aggregated Security Score", f"{(1-blended_risk)*100:.1f}%")
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric("GNN Risk", f"{p_gnn*100:.2f}%")
+    c2.metric("XGBoost Risk", f"{p_xgb*100:.2f}%")
+    c3.metric("Final Risk", f"{final_score*100:.2f}%")
 
     st.divider()
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Dynamic Network Topology")
-        dot_code = 'digraph { rankdir=LR; node [style=filled, fontcolor=white, shape=circle];'
-        dot_code += f'Target [color="#ff4b4b", label="Target\\nTx"];'
-        
-        # Dynamically add Senders
-        for i in range(1, in_deg + 1):
-            dot_code += f'S{i} [label="Sender {i}", color="#555"]; S{i} -> Target;'
-            
-        # Dynamically add Receivers
-        for i in range(in_deg + 1, num_nodes):
-            dot_code += f'R{i} [label="Receiver {i}", color="#555"]; Target -> R{i};'
-            
-        dot_code += '}'
-        st.graphviz_chart(dot_code)
 
-    with c2:
-        st.subheader("📝 Explainable AI (Why?)")
-        if models['xgb']:
-            try:
-                # Professional Labels
-                names = [f"Other Proprietary_{i}" for i in range(xgb_count)]
-                names[0], names[1], names[2] = "Transaction Value", "Gas Fee Density", "Network Centrality"
-                
-                df = pd.DataFrame(xgb_input, columns=names)
-                explainer = shap.TreeExplainer(models['xgb'])
-                shap_values = explainer(df) # Use the newer Explainer API for better plots
+    # Graph visualization
+    st.subheader("📊 Transaction Network")
+    st.graphviz_chart(nx.nx_pydot.to_pydot(G).to_string())
 
-                plt.clf()
-                # Create a waterfall-style bar plot to match your reference image
-                # We show the top 10 features for clarity
-                shap.plots.bar(shap_values[0], max_display=10, show=False)
-                
-                fig = plt.gcf()
-                fig.set_size_inches(8, 5) # Match the aspect ratio of your image
-                st.pyplot(fig, bbox_inches='tight')
-                
-                # Help box like your reference image
-                st.info("""
-                **How to read this graph:**
-                * **Red Bars (+)**: These features increase the fraud risk score.
-                * **Blue Bars (-)**: These features make the transaction look safer.
-                * The length represents the strength of the feature's influence.
-                """)
-            except Exception as e:
-                st.warning(f"SHAP Visualization error: {e}")
+    # ==========================================
+    # 8. SHAP EXPLAINABILITY
+    # ==========================================
+    if models["xgb"]:
+        try:
+            explainer = shap.TreeExplainer(models["xgb"])
+
+            feature_names = ["emb_1", "emb_2", "degree"]
+            df = pd.DataFrame(xgb_input, columns=feature_names)
+
+            shap_values = explainer(df)
+
+            plt.clf()
+            shap.plots.bar(shap_values[0], show=False)
+
+            st.pyplot(plt.gcf())
+
+            st.info("""
+            🔴 Red → increases fraud risk  
+            🔵 Blue → decreases fraud risk  
+            """)
+
+        except Exception as e:
+            st.warning(f"SHAP error: {e}")
