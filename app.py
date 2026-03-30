@@ -80,12 +80,91 @@ with st.sidebar:
 # ==========================================
 if run_btn:
 
-    # -------- Add new node (transaction) --------
+# -------- Add new node (transaction) --------
+
+# ==========================================
+# PERSISTENT STORAGE (history + graph)
+# ==========================================
+    if "history" not in st.session_state:
+        st.session_state.history = {}
+
+    if "nx_graph" not in st.session_state:
+        st.session_state.nx_graph = nx.DiGraph()
+
+    history = st.session_state.history
+    G_nx = st.session_state.nx_graph
+
+    # ==========================================
+    # UPDATE GRAPH
+    # ==========================================
+    new_node_idx = data.x.shape[0]
+
+    # Add node to NetworkX graph
+    G_nx.add_node(new_node_idx)
+
+    # Connect to previous node (simple realistic structure)
+    if new_node_idx > 0:
+        G_nx.add_edge(new_node_idx - 1, new_node_idx)
+        G_nx.add_edge(new_node_idx, new_node_idx - 1)
+
+    # ==========================================
+    # UPDATE HISTORY
+    # ==========================================
+    if receiver not in history:
+        history[receiver] = {
+            "total_sent": 0,
+            "total_received": 0,
+            "count": 0
+        }
+
+    history[receiver]["total_received"] += amount
+    history[receiver]["count"] += 1
+
+    # ==========================================
+    # COMPUTE GRAPH METRICS
+    # ==========================================
+    pagerank = nx.pagerank(G_nx) if len(G_nx.nodes) > 1 else {new_node_idx: 0}
+    degree = G_nx.degree(new_node_idx)
+
+    # ==========================================
+    # BUILD 165 FEATURE VECTOR
+    # ==========================================
     new_features = np.zeros(165)
 
-    # VERY IMPORTANT: map real inputs to feature space
-    new_features[0] = amount / 1000.0
+    # 🔹 1. BASIC FEATURES
+    new_features[0] = amount / 1000
     new_features[1] = fee / 0.01
+
+    # 🔹 2. HISTORY FEATURES
+    new_features[2] = history[receiver]["total_received"] / 10000
+    new_features[3] = history[receiver]["count"]
+
+    # 🔹 3. GRAPH FEATURES
+    new_features[4] = degree
+    new_features[5] = pagerank.get(new_node_idx, 0)
+
+    # 🔹 4. DERIVED FEATURES
+    if history[receiver]["count"] > 0:
+        new_features[6] = history[receiver]["total_received"] / history[receiver]["count"]
+
+    # (Remaining features stay 0 — unknown in live system)
+
+    # Convert to tensor
+    new_tensor = torch.tensor(new_features, dtype=torch.float).unsqueeze(0)
+
+    # Append node to PyG graph
+    data.x = torch.cat([data.x, new_tensor], dim=0)
+
+    # ==========================================
+    # EDGE INDEX UPDATE (PyTorch Geometric)
+    # ==========================================
+    if new_node_idx > 0:
+        new_edges = torch.tensor([
+            [new_node_idx - 1, new_node_idx],
+            [new_node_idx, new_node_idx - 1]
+        ], dtype=torch.long)
+
+    data.edge_index = torch.cat([data.edge_index, new_edges], dim=1)
 
     new_tensor = torch.tensor(new_features, dtype=torch.float).unsqueeze(0)
 
