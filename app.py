@@ -224,6 +224,7 @@ def wallet_node_features(wallet: str, G: nx.DiGraph, df: pd.DataFrame) -> np.nda
     feat[13] = 0.0
     feat[14] = np.log1p(total_vol)  / 10.0
     feat[15] = min(fanout / 5.0, 1.0)   # cap at 5x fan-out
+    np.random.seed(abs(hash(wallet)) % (2**32))
     feat[16:] = np.random.normal(0, 0.01, size=GNN_FEATURES - 16)
     return feat
 
@@ -588,7 +589,7 @@ with tab_submit:
             else:
                 with st.spinner("Running GNN on the transaction graph…"):
                     try:
-                        data_pyg, tgt_idx = graph_to_pyg(G, df_with_new, sender.strip())
+                        data_pyg, tgt_idx = graph_to_pyg(G, df_with_new, receiver.strip())
                         with torch.no_grad():
                             log_logits = gnn_model(data_pyg)
                             probs      = torch.exp(log_logits)
@@ -663,7 +664,7 @@ with tab_submit:
 
         if ensemble is not None:
             # Cold start protection
-            if G.number_of_nodes() < 15:
+            if ensemble is not None and G.number_of_nodes() < 15:
                 st.info("ℹ️ Not enough graph data yet — treating as LOW RISK (cold start).")
                 ensemble = min(ensemble, 0.25)
             elif ensemble > 0.25:
