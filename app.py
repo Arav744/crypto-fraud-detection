@@ -300,65 +300,77 @@ def load_xgb():
 # 5. XGBoost INFERENCE  (uses model_features.pkl to align columns)
 # ---------------------------------------------------------------------------
 def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
-                G: nx.DiGraph, df: pd.DataFrame, wallet: str) -> tuple[float | None, dict]:
+                G: nx.DiGraph, df: pd.DataFrame, wallet: str) -> tuple:
     """
-    Build a feature row matching fraud_model.pkl's training columns.
-    Returns (probability, debug_dict).
-    Returns (None, debug_dict) if no columns matched — avoids garbage predictions.
+    Build a feature row matching fraud_model.pkl's exact column names.
+    Uses a list of (value, exact_name) pairs — NOT a dict — to avoid
+    float-key collisions when multiple features are 0.0 simultaneously.
+    Returns (probability, debug_dict) or (None, debug_dict).
     """
     sent_rows = df[df["sender"]   == wallet]
     recv_rows = df[df["receiver"] == wallet]
 
-    # Every plausible alias for each value, covering common Ethereum dataset variants
-    value_map = {
-        # Time-based
-        float(df["time_step"].max() - df["time_step"].min()) * 60: [
-            "Time Diff between first and last (Mins)",   # exact name with parentheses
-            "Time Diff between first and last Mins",     # fallback without
-            "time_diff_first_last_mins", "TimeDiff"],
-        float(sent_rows["time_step"].diff().mean() * 60) if len(sent_rows) > 1 else 0.0: [
-            "Avg min between sent tnx", "avg_min_between_sent_tnx"],
-        float(recv_rows["time_step"].diff().mean() * 60) if len(recv_rows) > 1 else 0.0: [
-            "Avg min between received tnx", "avg_min_between_received_tnx"],
-        # Counts
-        float(len(sent_rows)): [
-            "Sent tnx", "sent_tnx", "num_sent", "n_sent"],
-        float(len(recv_rows)): [
-            "Received Tnx", "received_tnx", "num_received", "n_received"],
-        float(recv_rows["sender"].nunique()): [
-            "Unique Received From Addresses", "unique_received_from",
-            "unique_received_from_addresses"],
-        float(sent_rows["receiver"].nunique()): [
-            "Unique Sent To Addresses", "unique_sent_to",
-            "unique_sent_to_addresses"],
-        0.0: ["Number of Created Contracts", "created_contracts"],
-        # Amounts received
-        float(recv_rows["amount"].min())  if len(recv_rows) else 0.0: [
-            "min value received", "min_value_received"],
-        float(recv_rows["amount"].max())  if len(recv_rows) else 0.0: [
-            "max value received ",          # exact name — trailing space is real
-            "max value received",           # fallback without space
-            "max_value_received"],
-        float(recv_rows["amount"].mean()) if len(recv_rows) else 0.0: [
-            "avg val received", "avg_value_received", "avg_val_received"],
-        float(recv_rows["amount"].sum()): [
-            "total ether received", "total_ether_received",
-            "total Ether received", "totalEtherReceived"],
-        # Amounts sent
-        float(sent_rows["amount"].min())  if len(sent_rows) else 0.0: [
-            "min val sent", "min_val_sent", "min_value_sent"],
-        float(sent_rows["amount"].max())  if len(sent_rows) else 0.0: [
-            "max val sent", "max_val_sent", "max_value_sent"],
-        float(sent_rows["amount"].mean()) if len(sent_rows) else 0.0: [
-            "avg val sent", "avg_val_sent", "avg_value_sent"],
-        float(sent_rows["amount"].sum()): [
-            "total Ether sent", "total_ether_sent",
-            "total ether sent", "totalEtherSent"],
-        # Balance
-        float(recv_rows["amount"].sum() - sent_rows["amount"].sum()): [
-            "total ether balance", "total_ether_balance",
-            "ERC20 total Ether received", "balance"],
-    }
+    def safe(v):
+        try:
+            f = float(v)
+            return f if np.isfinite(f) else 0.0
+        except Exception:
+            return 0.0
+
+    # List of (computed_value, exact_column_name_from_model_features_pkl)
+    # Each entry is independent — no key collisions possible.
+    mappings = [
+        # ── Time features ──────────────────────────────────────────────
+        (safe((df["time_step"].max() - df["time_step"].min()) * 60),
+            "Time Diff between first and last (Mins)"),
+        (safe(sent_rows["time_step"].diff().mean() * 60) if len(sent_rows) > 1 else 0.0,
+            "Avg min between sent tnx"),
+        (safe(recv_rows["time_step"].diff().mean() * 60) if len(recv_rows) > 1 else 0.0,
+            "Avg min between received tnx"),
+        # ── Count features ─────────────────────────────────────────────
+        (safe(len(sent_rows)),          "Sent tnx"),
+        (safe(len(recv_rows)),          "Received Tnx"),
+        (0.0,                           "Number of Created Contracts"),
+        (safe(recv_rows["sender"].nunique()),   "Unique Received From Addresses"),
+        (safe(sent_rows["receiver"].nunique()), "Unique Sent To Addresses"),
+        # ── Received amount features ────────────────────────────────────
+        (safe(recv_rows["amount"].min())  if len(recv_rows) else 0.0, "min value received"),
+        (safe(recv_rows["amount"].max())  if len(recv_rows) else 0.0, "max value received "),  # trailing space intentional
+        (safe(recv_rows["amount"].mean()) if len(recv_rows) else 0.0, "avg val received"),
+        (safe(recv_rows["amount"].sum()),  "total ether received"),
+        # ── Sent amount features ────────────────────────────────────────
+        (safe(sent_rows["amount"].min())  if len(sent_rows) else 0.0, "min val sent"),
+        (safe(sent_rows["amount"].max())  if len(sent_rows) else 0.0, "max val sent"),
+        (safe(sent_rows["amount"].mean()) if len(sent_rows) else 0.0, "avg val sent"),
+        (safe(sent_rows["amount"].sum()),  "total Ether sent"),
+        # ── Balance ─────────────────────────────────────────────────────
+        (safe(recv_rows["amount"].sum() - sent_rows["amount"].sum()), "total ether balance"),
+        # ── ERC20 placeholders (we have no token data — leave 0) ────────
+        (0.0, "ERC20 total Ether received"),
+        (0.0, "ERC20 total ether sent"),
+        (0.0, "ERC20 total Ether sent contract"),
+        (0.0, "ERC20 uniq sent addr"),
+        (0.0, "ERC20 uniq rec addr"),
+        (0.0, "ERC20 uniq sent addr.1"),
+        (0.0, "ERC20 uniq rec contract addr"),
+        (0.0, "ERC20 avg time between sent tnx"),
+        (0.0, "ERC20 avg time between rec tnx"),
+        (0.0, "ERC20 avg time between rec 2 tnx"),
+        (0.0, "ERC20 avg time between contract tnx"),
+        (0.0, "ERC20 min val sent"),
+        (0.0, "ERC20 max val sent"),
+        (0.0, "ERC20 avg val sent"),
+        (0.0, "ERC20 min val sent contract"),
+        (0.0, "ERC20 max val sent contract"),
+        (0.0, "ERC20 avg val sent contract"),
+        (0.0, "ERC20 min val rec"),
+        (0.0, "ERC20 max val rec"),
+        (0.0, "ERC20 avg val rec"),
+        (0.0, "ERC20 uniq sent token name"),
+        (0.0, "ERC20 uniq rec token name"),
+        (0.0, "ERC20 most sent token type"),
+        (0.0, "ERC20 most rec token type"),
+    ]
 
     row = pd.DataFrame(
         np.zeros((1, len(feature_names)), dtype=np.float32),
@@ -366,21 +378,18 @@ def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
     )
 
     matched_cols = []
-    for value, aliases in value_map.items():
-        for alias in aliases:
-            if alias in row.columns:
-                row[alias] = float(value) if np.isfinite(float(value)) else 0.0
-                matched_cols.append(alias)
-                break   # found this value's column — move to next value
+    for value, col_name in mappings:
+        if col_name in row.columns:
+            row[col_name] = value
+            matched_cols.append(col_name)
 
     debug = {
-        "total_model_features": len(feature_names),
-        "matched_columns": len(matched_cols),
-        "matched_names": matched_cols,
+        "total_model_features":  len(feature_names),
+        "matched_columns":       len(matched_cols),
+        "matched_names":         matched_cols,
         "first_10_model_features": list(feature_names[:10]),
     }
 
-    # If we matched nothing, don't trust the prediction
     if len(matched_cols) == 0:
         return None, debug
 
