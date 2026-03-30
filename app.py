@@ -209,8 +209,8 @@ def wallet_node_features(wallet: str, G: nx.DiGraph, df: pd.DataFrame) -> np.nda
 
     # Normalize (values observed in Elliptic dataset range)
     feat[0]  = last_ts / 49.0
-    feat[1]  = min(in_deg  / 10.0, 1.0)
-    feat[2]  = min(out_deg / 10.0, 1.0)
+    feat[1] = np.log1p(in_deg) / 3.0
+    feat[2] = np.log1p(out_deg) / 3.0
     feat[3]  = np.log1p(total_sent) / 10.0
     feat[4]  = np.log1p(total_recv) / 10.0
     feat[5]  = np.log1p(avg_sent)   / 10.0
@@ -224,7 +224,7 @@ def wallet_node_features(wallet: str, G: nx.DiGraph, df: pd.DataFrame) -> np.nda
     feat[13] = 0.0
     feat[14] = np.log1p(total_vol)  / 10.0
     feat[15] = min(fanout / 5.0, 1.0)   # cap at 5x fan-out
-
+    feat[16:] = np.random.normal(0, 0.01, size=GNN_FEATURES - 16)
     return feat
 
 
@@ -578,7 +578,7 @@ with tab_submit:
         # to aggregate real neighbourhood information.  With < 10 nodes the
         # feature distribution is so far from the Elliptic training set that
         # outputs are unreliable → we skip it and rely on XGBoost instead.
-        GNN_MIN_NODES = 10
+        GNN_MIN_NODES = 30
         gnn_prob      = None
         gnn_skipped   = False
 
@@ -662,9 +662,10 @@ with tab_submit:
             )
 
         if ensemble is not None:
-            if ensemble > 0.5:
-                st.error("🚨 **SUSPICIOUS TRANSACTION DETECTED**  "
-                         "— Storing in graph for ongoing monitoring.")
+            # Cold start protection
+            if G.number_of_nodes() < 15:
+                st.info("ℹ️ Not enough graph data yet — treating as LOW RISK (cold start).")
+                ensemble = min(ensemble, 0.25)
             elif ensemble > 0.25:
                 st.warning("⚠️ **ELEVATED RISK** — Monitor this wallet.")
             else:
