@@ -672,12 +672,17 @@ with tab_submit:
 
         # ── Ensemble (fixed if/elif chain) ─────────────────────────────────
         ensemble = compute_ensemble(gnn_prob, xgb_prob, G.number_of_nodes())
-
+        # Smooth anomaly amplification
+        anomaly_boost = np.tanh(behavior_score * 2) * 0.2
+        ensemble = np.clip(ensemble + anomaly_boost, 0, 1)
         # 🔥 Add behavior intelligence
         behavior_score = compute_behavior_score(sender, G, df_with_new)
 
         if ensemble is not None:
-            ensemble = 0.7 * ensemble + 0.3 * behavior_score
+            # Increase behavior importance when anomaly is strong
+            behavior_weight = 0.3 + 0.4 * behavior_score   # ranges 0.3 → 0.7
+            ensemble = (1 - behavior_weight) * ensemble + behavior_weight * behavior_score
+
 
         # ── Display scores ─────────────────────────────────────────────────
         r1, r2, r3 = st.columns(3)
@@ -716,10 +721,12 @@ with tab_submit:
                     "🚨 **SUSPICIOUS TRANSACTION DETECTED** "
                     "— storing in graph for ongoing monitoring."
                 )
-            elif ensemble > 0.25:
-                st.warning("⚠️ **ELEVATED RISK** — monitor this wallet.")
+            if ensemble > 0.6:
+                st.error("🚨 **HIGH RISK — Likely Fraud**")
+            elif ensemble > 0.35:
+                st.warning("⚠️ **ELEVATED RISK — Monitor this wallet.**")
             else:
-                st.success("✅ **LOW RISK** — transaction appears legitimate.")
+                st.success("✅ **LOW RISK — Transaction appears legitimate.**")
 
         # ── Graph context ──────────────────────────────────────────────────
         with st.expander("🔍 Graph context for this prediction"):
