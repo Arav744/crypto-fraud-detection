@@ -665,7 +665,7 @@ with tab_submit:
                 w_gnn = 0.4
             ensemble = w_gnn * gnn_prob + (1 - w_gnn) * xgb_prob
         if abs(gnn_prob - xgb_prob) > 0.5:
-            ensemble = xgb_score * 0.8 + ensemble * 0.2
+            ensemble = xgb_prob * 0.8 + ensemble * 0.2
         elif xgb_prob is not None:
             ensemble = xgb_prob
         elif gnn_prob is not None:
@@ -721,8 +721,8 @@ with tab_submit:
             fanout = out_degree / (in_degree + 1e-6)
             risk_adjustment += np.tanh(fanout / 3.0) * 0.2
             # 4. Graph centrality influence (if available)
-            if gnn_score is not None:
-                risk_adjustment += (gnn_score - 0.5) * 0.3
+            if gnn_prob is not None:
+                risk_adjustment += (gnn_prob - 0.5) * 0.3
             # Apply adjustment
             ensemble = np.clip(ensemble + risk_adjustment, 0, 1)
             if ensemble > 0.25:
