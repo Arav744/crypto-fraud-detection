@@ -26,7 +26,8 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import joblib
-
+import shap
+import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 # 0. CONSTANTS
 # ---------------------------------------------------------------------------
@@ -169,14 +170,13 @@ def load_synthetic_data(xgb_model, xgb_features, gnn_model):
         # Score with XGBoost
         if xgb_model is not None and xgb_features is not None:
             try:
-                xgb_prob, _ = xgb_predict(
+                xgb_prob, _,xgb_row = xgb_predict(
                     xgb_model, xgb_features,
                     wallet_node_features(s, G_temp, df_temp),
                     G_temp, df_temp, s
                 )
             except Exception:
                 pass
-
         # Score with GNN if graph big enough
         if gnn_model is not None and G_temp.number_of_nodes() >= GNN_MIN_NODES:
             try:
@@ -434,7 +434,7 @@ def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
         return None, debug
 
     prob = xgb_model.predict_proba(row)[0, 1]
-    return float(prob), debug
+    return float(prob), debug, row
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +540,13 @@ init_db()
 
 gnn_model          = load_gnn()
 xgb_model, xgb_features = load_xgb()
+# ===== SHAP EXPLAINER =====
+@st.cache_resource
+def get_shap_explainer(model):
+    return shap.TreeExplainer(model)
 
+shap_explainer = get_shap_explainer(xgb_model) if xgb_model else None
+# =========================
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🛡️ Crypto Fraud Sentinel")
@@ -657,11 +663,12 @@ with tab_submit:
         xgb_debug = {}
         if xgb_model is not None:
             try:
-                xgb_prob, xgb_debug = xgb_predict(
+                xgb_prob, xgb_debug,xgb_row = xgb_predict(
                     xgb_model, xgb_features,
                     wallet_node_features(sender, G, df_with_new),
                     G, df_with_new, sender
                 )
+                
                 if xgb_prob is None:
                     st.warning(
                         "⚠️ XGBoost skipped — no column names matched. "
@@ -669,7 +676,12 @@ with tab_submit:
                     )
             except Exception as e:
                 st.warning(f"XGBoost inference failed: {e}")
-
+            shap_values = None
+            if shap_explainer is not None and xgb_row is not None:
+                try:
+                    shap_values = shap_explainer.shap_values(xgb_row)[0]
+                except Exception:
+                    shap_values = None
         # ── Ensemble (fixed if/elif chain) ─────────────────────────────────
         ensemble = compute_ensemble(gnn_prob, xgb_prob, G.number_of_nodes())
         # Smooth anomaly amplification
@@ -712,7 +724,30 @@ with tab_submit:
                 f"ℹ️ GNN skipped — graph has {G.number_of_nodes()} nodes "
                 f"(needs ≥ {GNN_MIN_NODES}). Using XGBoost only."
             )
+        # ===== SHAP DISPLAY =====
+        st.subheader("🔍 Why this prediction?")
 
+        if shap_values is not None:
+            feature_importance = list(zip(xgb_features, shap_values))
+            feature_importance = sorted(feature_importance, key=lambda x: abs(x[1]), reverse=True)[:10]
+
+            names = [f[0] for f in feature_importance]
+            values = [f[1] for f in feature_importance]
+
+            fig, ax = plt.subplots()
+            ax.barh(names[::-1], values[::-1])
+            ax.set_title("Top Features")
+
+            st.pyplot(fig)
+
+            st.markdown("### 🧠 Key Drivers")
+
+            for name, val in feature_importance[:5]:
+                if val > 0:
+                    st.write(f"🔺 {name} increases risk")
+                else:
+                    st.write(f"🔻 {name} reduces risk")
+        # ========================
         # ── Risk verdict (BUG FIX: restored the 🚨 fraud banner) ──────────
         if ensemble is not None:
             if ensemble > 0.5:
