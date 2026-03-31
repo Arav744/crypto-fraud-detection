@@ -274,7 +274,7 @@ def wallet_node_features(wallet: str, G: nx.DiGraph, df: pd.DataFrame) -> np.nda
     feat[12] = float(out_cent)
     feat[13] = 0.0
     feat[14] = np.log1p(total_vol) / 10.0
-    feat[15] = min(fanout / 5.0, 1.0)
+    feat[15] = np.tanh(fanout / 3.0)
     # feat[16:164] remain 0.0 — deterministic, model-neutral
 
     return feat
@@ -441,31 +441,32 @@ def xgb_predict(xgb_model, feature_names: list, feat_vec: np.ndarray,
 # 7. ENSEMBLE  (fixed — was broken if/elif chain)
 # ---------------------------------------------------------------------------
 def compute_ensemble(gnn_prob, xgb_prob, n_nodes: int):
-    """
-    BUG FIX: The original code had a bare 'if' (not 'elif') after the first
-    block, causing the second block to ALWAYS run and overwrite the ensemble
-    with xgb_prob alone — GNN contribution was silently discarded every time.
-
-    Correct logic:
-      - Both available → weighted average, GNN weight grows with graph size
-      - Only one available → use it directly
-      - Neither → None
-    """
     if gnn_prob is not None and xgb_prob is not None:
-        # GNN weight grows as the graph becomes more informative
-        if n_nodes < 10:
-            w_gnn = 0.15
-        elif n_nodes < 20:
-            w_gnn = 0.25
-        else:
-            w_gnn = 0.40
+        w_gnn = min(0.4, np.log1p(n_nodes) / 10)
         return float(w_gnn * gnn_prob + (1.0 - w_gnn) * xgb_prob)
     elif xgb_prob is not None:
         return float(xgb_prob)
     elif gnn_prob is not None:
         return float(gnn_prob)
     return None
+def compute_behavior_score(wallet, G, df):
+    sent = df[df["sender"] == wallet]
+    recv = df[df["receiver"] == wallet]
+    total_sent = sent["amount"].sum()
+    total_recv = recv["amount"].sum()
+    avg_sent   = sent["amount"].mean() if len(sent) else 0.0
+    avg_fee    = sent["fee"].mean() if len(sent) else 0.0
+    in_deg  = G.in_degree(wallet)
+    out_deg = G.out_degree(wallet)
+    fanout = out_deg / (in_deg + 1e-6)
+    score = 0.0
+    score += np.tanh(total_sent / 100.0) * 0.25
+    score += np.tanh((0.002 - avg_fee) * 400) * 0.2
+    score += np.tanh(fanout / 3.0) * 0.25
+    imbalance = abs(total_sent - total_recv)
+    score += np.tanh(imbalance / 50.0) * 0.15
 
+    return np.clip(score, 0, 1)
 
 # ---------------------------------------------------------------------------
 # 8. GRAPH VISUALISATION
@@ -671,6 +672,12 @@ with tab_submit:
 
         # ── Ensemble (fixed if/elif chain) ─────────────────────────────────
         ensemble = compute_ensemble(gnn_prob, xgb_prob, G.number_of_nodes())
+
+        # 🔥 Add behavior intelligence
+        behavior_score = compute_behavior_score(sender, G, df_with_new)
+
+        if ensemble is not None:
+            ensemble = 0.7 * ensemble + 0.3 * behavior_score
 
         # ── Display scores ─────────────────────────────────────────────────
         r1, r2, r3 = st.columns(3)
