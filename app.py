@@ -658,14 +658,20 @@ with tab_submit:
         # ── Ensemble: weight XGBoost 70 %, GNN 30 % once graph is big enough
         # When GNN is skipped, use XGBoost only.
         if gnn_prob is not None and xgb_prob is not None:
-            ensemble = 0.3 * gnn_prob + 0.7 * xgb_prob
+            # Dynamic weighting based on graph size
+            if G.number_of_nodes() < 20:
+                w_gnn = 0.2
+            else:
+                w_gnn = 0.4
+            ensemble = w_gnn * gnn_prob + (1 - w_gnn) * xgb_prob
+        if abs(gnn_prob - xgb_prob) > 0.5:
+            ensemble = xgb_score * 0.8 + ensemble * 0.2
         elif xgb_prob is not None:
             ensemble = xgb_prob
         elif gnn_prob is not None:
             ensemble = gnn_prob
         else:
             ensemble = None
-
         # ── Display results ───────────────────────────────────────────────
         res_cols = st.columns(3)
         with res_cols[0]:
@@ -704,7 +710,22 @@ with tab_submit:
             if ensemble is not None and G.number_of_nodes() < 15:
                 st.info("ℹ️ Not enough graph data yet — treating as LOW RISK (cold start).")
                 ensemble = min(ensemble, 0.25)
-            elif ensemble > 0.25:
+            # 🔥 Soft anomaly scoring (no hard thresholds)
+            risk_adjustment = 0.0
+            # 1. Amount anomaly (log-scaled)
+            risk_adjustment += np.tanh(amount / 50.0) * 0.2
+            # 2. Fee anomaly (lower fee = more suspicious)
+            if fee > 0:
+                risk_adjustment += np.tanh((0.002 - fee) * 500) * 0.15
+            # 3. Degree imbalance (fan-out behavior)
+            fanout = out_degree / (in_degree + 1e-6)
+            risk_adjustment += np.tanh(fanout / 3.0) * 0.2
+            # 4. Graph centrality influence (if available)
+            if gnn_score is not None:
+                risk_adjustment += (gnn_score - 0.5) * 0.3
+            # Apply adjustment
+            ensemble = np.clip(ensemble + risk_adjustment, 0, 1)
+            if ensemble > 0.25:
                 st.warning("⚠️ **ELEVATED RISK** — Monitor this wallet.")
             else:
                 st.success("✅ **LOW RISK** — Transaction appears legitimate.")
