@@ -111,7 +111,41 @@ def insert_transaction(tx: dict) -> str:
         except sqlite3.IntegrityError:
             pass   # duplicate hash — very unlikely
     return tx_hash
+def load_synthetic_data():
+    synthetic_data = [
+        # -------- Legit --------
+        ("wallet_A", "wallet_B", 2.5, 0.0021, 12, 3, 2),
+        ("wallet_C", "wallet_D", 3.0, 0.0025, 13, 2, 2),
+        ("wallet_E", "wallet_F", 1.8, 0.0018, 14, 4, 1),
 
+        # -------- Suspicious --------
+        ("wallet_K", "wallet_L", 15.0, 0.005, 20, 1, 5),
+        ("wallet_L", "wallet_M", 14.5, 0.0045, 21, 1, 6),
+
+        # -------- Fraud chain --------
+        ("wallet_X", "wallet_Y", 120.0, 0.0005, 30, 0, 10),
+        ("wallet_Y", "wallet_Z", 115.0, 0.0004, 31, 0, 9),
+        ("wallet_Z", "wallet_AA", 110.0, 0.0003, 32, 0, 8),
+
+        # -------- Bot burst --------
+        ("wallet_bot", "wallet_1", 1.0, 0.0001, 15, 0, 8),
+        ("wallet_bot", "wallet_2", 1.1, 0.0001, 15, 0, 9),
+        ("wallet_bot", "wallet_3", 0.9, 0.0001, 15, 0, 7),
+    ]
+
+    for s, r, amt, fee, t, indeg, outdeg in synthetic_data:
+        insert_transaction({
+            "sender": s,
+            "receiver": r,
+            "amount": amt,
+            "fee": fee,
+            "time_step": t,
+            "in_degree": indeg,
+            "out_degree": outdeg,
+            "fraud_prob": None,
+            "xgb_prob": None,
+            "label": "unknown"
+        })
 
 def load_all_transactions() -> pd.DataFrame:
     with get_db() as conn:
@@ -507,7 +541,10 @@ with st.sidebar:
             c.commit()
         st.cache_resource.clear()
         st.rerun()
-
+    if st.button("⚡ Load Synthetic Dataset"):
+        load_synthetic_data()
+        st.success("Synthetic data loaded!")
+        st.rerun()
 # ── Main tabs ────────────────────────────────────────────────────────────────
 tab_submit, tab_graph, tab_history = st.tabs([
     "➕  Submit Transaction",
@@ -579,7 +616,7 @@ with tab_submit:
         # to aggregate real neighbourhood information.  With < 10 nodes the
         # feature distribution is so far from the Elliptic training set that
         # outputs are unreliable → we skip it and rely on XGBoost instead.
-        GNN_MIN_NODES = 30
+        GNN_MIN_NODES = 5
         gnn_prob      = None
         gnn_skipped   = False
 
