@@ -542,8 +542,8 @@ gnn_model          = load_gnn()
 xgb_model, xgb_features = load_xgb()
 # ===== SHAP EXPLAINER =====
 @st.cache_resource
-def get_shap_explainer(model):
-    return shap.TreeExplainer(model)
+def get_shap_explainer(_model):
+    return shap.TreeExplainer(_model)
 
 shap_explainer = get_shap_explainer(xgb_model) if xgb_model else None
 # =========================
