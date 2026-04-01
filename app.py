@@ -224,6 +224,7 @@ def build_graph(df: pd.DataFrame) -> nx.DiGraph:
     return G
 
 
+
 def wallet_node_features(wallet: str, G: nx.DiGraph, df: pd.DataFrame) -> np.ndarray:
     """
     165-dimensional feature vector for a wallet node.
@@ -527,6 +528,33 @@ def draw_graph(G: nx.DiGraph, df: pd.DataFrame,
     plt.tight_layout()
     return fig
 
+def simulate_fraud_propagation(G, initial_probs, steps=5, decay=0.7):
+    """
+    Simulate fraud spreading through graph
+    """
+    history = []
+    current_probs = initial_probs.copy()
+
+    for _ in range(steps):
+        new_probs = current_probs.copy()
+
+        for node in G.nodes():
+            neighbors = list(G.successors(node)) + list(G.predecessors(node))
+
+            influence = 0
+            for n in neighbors:
+                influence += current_probs.get(n, 0)
+
+            if neighbors:
+                influence /= len(neighbors)
+
+            # propagate with decay
+            new_probs[node] = max(current_probs.get(node, 0), influence * decay)
+
+        history.append(new_probs)
+        current_probs = new_probs
+
+    return history
 
 # ---------------------------------------------------------------------------
 # 9. STREAMLIT UI
@@ -727,26 +755,38 @@ with tab_submit:
         # ===== SHAP DISPLAY =====
         st.subheader("🔍 Why this prediction?")
 
-        if shap_values is not None:
-            feature_importance = list(zip(xgb_features, shap_values))
-            feature_importance = sorted(feature_importance, key=lambda x: abs(x[1]), reverse=True)[:10]
+        if shap_values is not None and xgb_row is not None:
+            try:
+                # Create SHAP explanation object
+                expl = shap.Explanation(
+                    values=shap_values,
+                    base_values=shap_explainer.expected_value,
+                    data=xgb_row.iloc[0],
+                    feature_names=xgb_features
+                )
 
-            names = [f[0] for f in feature_importance]
-            values = [f[1] for f in feature_importance]
+                # Plot waterfall
+                fig, ax = plt.subplots()
+                shap.plots.waterfall(expl, max_display=10, show=False)
 
-            fig, ax = plt.subplots()
-            ax.barh(names[::-1], values[::-1])
-            ax.set_title("Top Features")
+                st.pyplot(fig)
 
-            st.pyplot(fig)
+            except Exception as e:
+                st.warning(f"SHAP waterfall failed: {e}")
 
             st.markdown("### 🧠 Key Drivers")
 
-            for name, val in feature_importance[:5]:
+            top_features = sorted(
+                zip(xgb_features, shap_values),
+                key=lambda x: abs(x[1]),
+                reverse=True
+            )[:5]
+
+            for name, val in top_features:
                 if val > 0:
-                    st.write(f"🔺 {name} increases risk")
+                    st.write(f"🔺 {name} increases risk (+{val:.3f})")
                 else:
-                    st.write(f"🔻 {name} reduces risk")
+                    st.write(f"🔻 {name} reduces risk ({val:.3f})")
         # ========================
         # ── Risk verdict (BUG FIX: restored the 🚨 fraud banner) ──────────
         if ensemble is not None:
@@ -814,10 +854,34 @@ with tab_graph:
                     fraud_probs[w] = max(fraud_probs.get(w, 0.0), float(p))
 
         newest = df_all.iloc[-1]["sender"] if len(df_all) else None
+        if st.button("▶️ Animate Fraud Propagation"):
+            st.session_state.animate = True
         fig    = draw_graph(G, df_all, highlight_wallet=newest, fraud_probs=fraud_probs)
         if fig:
             st.pyplot(fig, use_container_width=True)
+        if st.session_state.get("animate", False):
 
+            st.subheader("🎬 Fraud Propagation Simulation")
+
+            # initial probabilities from your DB
+            base_probs = fraud_probs.copy()
+
+            history = simulate_fraud_propagation(G, base_probs, steps=6)
+
+            placeholder = st.empty()
+
+            import time
+
+            for step, probs in enumerate(history):
+                fig = draw_graph(G, df_all, fraud_probs=probs)
+
+                with placeholder.container():
+                    st.write(f"Step {step + 1}")
+                    st.pyplot(fig, use_container_width=True)
+
+                time.sleep(1)
+
+            st.session_state.animate = False
         st.divider()
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Nodes (wallets)",    G.number_of_nodes())
