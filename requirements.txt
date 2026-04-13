@@ -6,14 +6,3 @@ xgboost
 matplotlib
 networkx
 shap
-
-torch==2.0.1
-torchvision==0.15.2
-torchaudio==2.0.2
-
-# PyG dependencies
-torch-scatter -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
-torch-sparse -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
-torch-cluster -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
-torch-spline-conv -f https://data.pyg.org/whl/torch-2.0.1+cpu.html
-torch-geometric

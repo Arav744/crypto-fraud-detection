@@ -36,7 +36,7 @@ DB_PATH      = os.path.join(_APP_DIR, "transactions.db")
 GNN_FEATURES = 165
 GNN_HIDDEN   = 128
 GNN_CLASSES  = 2
-GNN_MIN_NODES = 5 
+GNN_MIN_NODES = 5   # minimum graph nodes before GNN activates
 
 # ---------------------------------------------------------------------------
 # 1. MODEL DEFINITION
@@ -134,6 +134,7 @@ def update_fraud_prob(tx_hash: str, fraud_prob: float, xgb_prob: float):
 # 3. SYNTHETIC DATA SEEDER
 # ---------------------------------------------------------------------------
 def load_synthetic_data(xgb_model, xgb_features, gnn_model):
+
     synthetic = [
         # (sender, receiver, amount, fee, time_step, in_deg, out_deg, known_label)
         ("wallet_A",   "wallet_B",  2.5,   0.0021, 12, 3, 2,  "legit"),
@@ -554,7 +555,10 @@ st.set_page_config(
 )
 init_db()
 
-gnn_model          = load_gnn()
+try:
+    gnn_model = load_gnn()
+except:
+    gnn_model = None
 xgb_model, xgb_features = load_xgb()
 # ===== SHAP EXPLAINER =====
 @st.cache_resource
@@ -659,7 +663,8 @@ with tab_submit:
         # BUG FIX: was scoring receiver.strip() — changed to sender
         gnn_prob    = None
         gnn_skipped = False
-
+        if gnn_model is None:
+            gnn_prob = 0
         if gnn_model is not None:
             if G.number_of_nodes() < GNN_MIN_NODES:
                 gnn_skipped = True
@@ -673,8 +678,6 @@ with tab_submit:
                             gnn_prob   = probs[tgt_idx, 1].item()
                     except Exception as e:
                         st.warning(f"GNN inference failed: {e}")
-
-        # ── XGBoost (primary model) ────────────────────────────────────────
         xgb_prob  = None
         xgb_debug = {}
         if xgb_model is not None:
