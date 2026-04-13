@@ -36,7 +36,7 @@ DB_PATH      = os.path.join(_APP_DIR, "transactions.db")
 GNN_FEATURES = 165
 GNN_HIDDEN   = 128
 GNN_CLASSES  = 2
-GNN_MIN_NODES = 5   # minimum graph nodes before GNN activates
+GNN_MIN_NODES = 5 
 
 # ---------------------------------------------------------------------------
 # 1. MODEL DEFINITION
@@ -134,11 +134,6 @@ def update_fraud_prob(tx_hash: str, fraud_prob: float, xgb_prob: float):
 # 3. SYNTHETIC DATA SEEDER
 # ---------------------------------------------------------------------------
 def load_synthetic_data(xgb_model, xgb_features, gnn_model):
-    """
-    Insert pre-labelled synthetic transactions so the graph is pre-populated
-    and fraud patterns exist before the user submits anything.
-    Scores each transaction at insert time so the graph visualization is colored.
-    """
     synthetic = [
         # (sender, receiver, amount, fee, time_step, in_deg, out_deg, known_label)
         ("wallet_A",   "wallet_B",  2.5,   0.0021, 12, 3, 2,  "legit"),
@@ -226,14 +221,7 @@ def build_graph(df: pd.DataFrame) -> nx.DiGraph:
 
 
 def wallet_node_features(wallet: str, G: nx.DiGraph, df: pd.DataFrame) -> np.ndarray:
-    """
-    165-dimensional feature vector for a wallet node.
-    Features 0–15: graph-derived, meaningful.
-    Features 16–164: zeros (not random noise — deterministic and neutral).
 
-    BUG FIX: removed np.random.normal noise injection — noise was seeded
-    by hash(wallet) making predictions wallet-name-dependent and non-reproducible.
-    """
     feat = np.zeros(GNN_FEATURES, dtype=np.float32)
 
     sent_rows = df[df["sender"]   == wallet]
@@ -712,12 +700,9 @@ with tab_submit:
                     shap_values = None
         # ── Ensemble (fixed if/elif chain) ─────────────────────────────────
         ensemble = compute_ensemble(gnn_prob, xgb_prob, G.number_of_nodes())
-        # Smooth anomaly amplification
-        # 🔥 Add behavior intelligence
         behavior_score = compute_behavior_score(sender, G, df_with_new)
 
         if ensemble is not None:
-            # Increase behavior importance when anomaly is strong
             behavior_weight = 0.3 + 0.4 * behavior_score   # ranges 0.3 → 0.7
             ensemble = (1 - behavior_weight) * ensemble + behavior_weight * behavior_score
             anomaly_boost = np.tanh(behavior_score * 2) * 0.2
@@ -862,8 +847,6 @@ with tab_graph:
         if st.session_state.get("animate", False):
 
             st.subheader("🎬 Fraud Propagation Simulation")
-
-            # initial probabilities from your DB
             base_probs = fraud_probs.copy()
 
             history = simulate_fraud_propagation(G, base_probs, steps=6)
